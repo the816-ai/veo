@@ -554,6 +554,68 @@ class BrowserController:
             return False
 
     def click_generate(self):
+        """Click button.bMhrec va xac nhan generation bat dau (button chuyen disabled)."""
+        try:
+            time.sleep(1.0)
+            btn = None
+            for by, sel in [
+                (By.CSS_SELECTOR, "button.bMhrec"),
+                (By.XPATH, "//button[contains(@class,'bMhrec')]"),
+                (By.XPATH, "//button[.//span[contains(.,'arrow_forward')]]"),
+                (By.XPATH, "//button[@aria-label='Generate' or @aria-label='T\u1ea1o']"),
+            ]:
+                try:
+                    el = self.driver.find_element(by, sel)
+                    if el and el.is_displayed():
+                        btn = el; break
+                except: continue
+
+            if btn:
+                dis = btn.get_attribute("disabled") or btn.get_attribute("aria-disabled")
+                if dis and str(dis).lower() in ("true","disabled"):
+                    self.log("Nut Tao DISABLED — prompt chua vao React, khong click")
+                    return False
+
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});", btn)
+                time.sleep(0.2)
+                try:
+                    ActionChains(self.driver).move_to_element(btn).click().perform()
+                    self.log("Click Tao (ActionChains)")
+                except:
+                    self.driver.execute_script("arguments[0].click();", btn)
+                    self.log("Click Tao (JS click)")
+
+                # Xac nhan: sau 2s button phai chuyen sang disabled (dang generate)
+                time.sleep(2)
+                try:
+                    dis_after = btn.get_attribute("disabled") or btn.get_attribute("aria-disabled")
+                    if dis_after and str(dis_after).lower() in ("true","disabled"):
+                        self.log("XHAC NHAN: Flow dang generate!")
+                        return True
+                    else:
+                        self.log("WARNING: button khong disabled sau click — prompt co the trong")
+                except: pass
+                return True
+
+            # Fallback Enter
+            for by, sel in [(By.CSS_SELECTOR, "div.fyuIsy"),
+                            (By.CSS_SELECTOR, "div[role='textbox']")]:
+                try:
+                    box = self.driver.find_element(by, sel)
+                    if box and box.is_displayed():
+                        self.driver.execute_script("arguments[0].focus();", box)
+                        box.send_keys(Keys.RETURN)
+                        self.log("Enter -> generate (fallback)")
+                        return True
+                except: continue
+
+            self.log("THAT BAI click Generate")
+            return False
+        except Exception as e:
+            self.log(f"click_generate: {e}")
+            return False
+
         """Click button.bMhrec (confirmed Flow generate button)."""
         try:
             time.sleep(1.0)
@@ -647,7 +709,48 @@ class BrowserController:
         self.log(f"⏱ Timeout sau {timeout}s — tiếp prompt tiếp")
         return False
 
-    def wait_for_prompt_ready(self, timeout=30):
+    def wait_for_prompt_ready(self, timeout=90):
+        """
+        Cho nen button.bMhrec ENABLED (Flow hoan tat generate, san sang nhan prompt moi).
+        VA textbox trong/placeholder (khong con noi dung cu).
+        """
+        self.log("Cho Flow hoan tat va mo o nhap (toi da 90s)...")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                btn = None
+                for by, sel in [
+                    (By.CSS_SELECTOR, "button.bMhrec"),
+                    (By.XPATH, "//button[contains(@class,'bMhrec')]"),
+                ]:
+                    try:
+                        el = self.driver.find_element(by, sel)
+                        if el and el.is_displayed():
+                            btn = el; break
+                    except: continue
+
+                if btn:
+                    dis = btn.get_attribute("disabled") or btn.get_attribute("aria-disabled")
+                    btn_enabled = not (dis and str(dis).lower() in ("true","disabled"))
+                    if btn_enabled:
+                        # Kiem tra textbox co trong khong
+                        try:
+                            box = self.driver.find_element(
+                                By.CSS_SELECTOR, "div.fyuIsy[contenteditable='true']")
+                            content = (self.driver.execute_script(
+                                "return arguments[0].innerText||\'\';" , box) or "").strip()
+                            if not content or len(content) < 3:
+                                self.log("O prompt trong san sang!")
+                                return True
+                        except:
+                            # Neu khong kiem tra duoc textbox, button enabled la du
+                            self.log("Button enabled, san sang!")
+                            return True
+            except: pass
+            time.sleep(3)
+        self.log("Timeout 90s — tiep tuc bat chap")
+        return False
+
         """Đợi ô prompt xuất hiện trở lại sau khi video render xong.
         Dùng để tiếp tục dán prompt mới mà không cần tạo project mới.
         Trả về True nếu ô prompt sẵn sàng.
