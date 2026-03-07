@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual env
+venv/
+env/
+.env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific - sensitive files
+veo/output/
+output/
+*.mp4
+*.webm
+*.jpg
+*.png
+*.jpeg
+!veo/assets/*.png
+!veo/assets/*.jpg
+
+# API keys & secrets
+.veo3_gemini_key
+.env
+*.key
+secrets.json
+
+# Logs
+*.log
+logs/
+
+# Chrome profile / session data
+chrome_profile/
+user_data/
+
+# Downloads
+downloads/
+Downloads/
