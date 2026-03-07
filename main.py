@@ -3,6 +3,10 @@ Veo 3 Flow Automation Tool
 Tự động hóa Google Flow để tạo video Veo 3
 """
 import json
+try:
+    import pyautogui; pyautogui.FAILSAFE=False; pyautogui.PAUSE=0.02
+except ImportError:
+    pyautogui = None
 import os, sys, time, json, threading, subprocess, shutil, re
 from pathlib import Path
 from tkinter import *
@@ -464,6 +468,51 @@ class BrowserController:
             time.sleep(0.5)
             self.driver.execute_script("arguments[0].click();", box)
             time.sleep(0.3)
+            # ── PP0: PyAutoGUI OS-level typing (bypass WebDriver detection) ──
+            # Flow co the block input khi detect Chrome remote debug port
+            # PyAutoGUI gui key event thuc su tu OS, khong the bi block
+            try:
+                import pyautogui as _pag
+                _pag.FAILSAFE = False; _pag.PAUSE = 0.02
+                # Lay vi tri tuyet doi cua element tren man hinh
+                _loc  = box.location
+                _sz   = box.size
+                _win  = self.driver.execute_script(
+                    "return {x:window.screenX,y:window.screenY,"
+                    "h:window.outerHeight-window.innerHeight}")
+                abs_x = int(_win['x'] + _loc['x'] + _sz['width']  / 2)
+                abs_y = int(_win['y'] + _win['h'] + _loc['y'] + _sz['height'] / 2)
+                # Click vao vi tri do (OS level)
+                _pag.click(abs_x, abs_y)
+                import time as _t; _t.sleep(0.4)
+                # Xoa noi dung cu
+                _pag.hotkey('ctrl', 'a')
+                _t.sleep(0.1)
+                _pag.press('delete')
+                _t.sleep(0.15)
+                # Paste qua clipboard (nhanh hon type tung char)
+                import subprocess as _sub, tempfile as _tmp
+                _tf = _tmp.NamedTemporaryFile(mode='w',suffix='.txt',delete=False,encoding='utf-8')
+                _tf.write(text); _tf.close()
+                _sub.run(["powershell","-Command",
+                    "$p=[System.IO.Path]::GetFullPath($args[0]);"
+                    "Set-Clipboard -Value ([System.IO.File]::ReadAllText($p,"
+                    "[System.Text.Encoding]::UTF8))", _tf.name],
+                    capture_output=True, timeout=8)
+                try: import os as _os; _os.unlink(_tf.name)
+                except: pass
+                _pag.hotkey('ctrl', 'v')
+                _t.sleep(0.6)
+                # Kiem tra
+                _actual = (self.driver.execute_script(
+                    "return arguments[0].innerText;", box) or "").strip()
+                if _actual and text[:20].strip().lower() in _actual.lower():
+                    self.log(f"OK (pyautogui+paste): {text[:55]}...")
+                    return True
+                self.log(f"pyautogui actual='{_actual[:30]}', thu send_keys...")
+            except Exception as _ep:
+                self.log(f"pyautogui loi: {_ep}, thu send_keys...")
+
 
             # ── Phương pháp 1: send_keys từng chunk — đáng tin nhất với React ──
             try:
