@@ -414,257 +414,214 @@ class BrowserController:
             return False
 
     def set_prompt(self, text):
-        """
-        Nhap prompt vao Flow div.fyuIsy.
-        PP chinh: WebDriver send_keys() - cach duy nhat trigger React synthetic events.
-        Xac nhan: button.bMhrec chuyen tu disabled -> enabled sau khi React nhan text.
-        """
+        """Nhập prompt vào Flow — clipboard paste (trigger real React paste event)"""
         import subprocess, tempfile
 
-        def _to_clip(t):
+        def _copy_to_clipboard(t):
+            """Copy text vào Windows clipboard qua PowerShell — safe với path bất kỳ"""
             try:
+                # Ghi ra file tạm với encoding UTF-8
                 tmp = tempfile.NamedTemporaryFile(
-                    mode='w', suffix='.txt', delete=False, encoding='utf-8')
+                    mode='w', suffix='.txt', delete=False, encoding='utf-8'
+                )
                 tmp.write(t); tmp.close()
+                # Dùng đường dẫn an toàn qua biến PS (tránh lỗi ký tự đặc biệt)
                 subprocess.run(
                     ["powershell", "-Command",
-                     "$p=[System.IO.Path]::GetFullPath($args[0]);"
-                     "Set-Clipboard -Value ([System.IO.File]::ReadAllText("
-                     "$p,[System.Text.Encoding]::UTF8))", tmp.name],
-                    capture_output=True, timeout=8)
+                     "$p = [System.IO.Path]::GetFullPath($args[0]);"
+                     "Set-Clipboard -Value ([System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8))",
+                     tmp.name],
+                    capture_output=True, timeout=8
+                )
                 try: os.unlink(tmp.name)
                 except: pass
-                return True
-            except: return False
-
-        def _btn_enabled():
-            """Kiem tra button.bMhrec co enabled (React da nhan text)."""
-            try:
-                for by, sel in [
-                    (By.CSS_SELECTOR, "button.bMhrec"),
-                    (By.XPATH, "//button[contains(@class,'bMhrec')]"),
-                ]:
-                    try:
-                        btn = self.driver.find_element(by, sel)
-                        if btn and btn.is_displayed():
-                            dis = btn.get_attribute("disabled") or btn.get_attribute("aria-disabled")
-                            return not (dis and str(dis).lower() in ("true","disabled"))
-                    except: continue
-            except: pass
-            return None  # button khong tim thay
+            except Exception as ce:
+                self.log(f"⚠ Clipboard error: {ce}")
 
         try:
-            # Tim o prompt (div.fyuIsy xac nhan qua DOM inspect)
+            # Chờ ô prompt thực sự clickable
             box = None
-            for by, sel in [
-                (By.CSS_SELECTOR, "div.fyuIsy[contenteditable='true']"),
-                (By.CSS_SELECTOR, "div[contenteditable='true'][role='textbox']"),
-                (By.CSS_SELECTOR, "div[role='textbox']"),
-                (By.CSS_SELECTOR, "div[contenteditable='true']"),
-            ]:
+            for sel in ["div.fyuIsy[role='textbox']", "div[role='textbox']",
+                        "div[contenteditable='true']"]:
                 try:
-                    el = WebDriverWait(self.driver, 10).until(
-                        EC.element_to_be_clickable((by, sel)))
-                    if el and el.is_displayed():
-                        box = el; break
-                except: continue
+                    box = WebDriverWait(self.driver, 15).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
+                    )
+                    if box and box.is_displayed():
+                        break
+                    box = None
+                except:
+                    continue
 
             if not box:
-                self.log("Khong tim thay div.fyuIsy")
+                self.log("❌ Không tìm thấy ô prompt (15s timeout)")
                 return False
 
+            # Scroll vào giữa màn hình + JS focus (tránh overlay chặn click)
             self.driver.execute_script(
-                "arguments[0].scrollIntoView({block:'center'});", box)
+                "arguments[0].scrollIntoView({block:'center', inline:'center'});", box
+            )
+            time.sleep(0.5)
+            self.driver.execute_script("arguments[0].click();", box)
             time.sleep(0.3)
 
-            # ── PP1: send_keys qua WebDriver (trigger dung React synthetic events) ──
+            # ── Phương pháp 1: send_keys từng chunk — đáng tin nhất với React ──
             try:
-                # Click de focus
-                self.driver.execute_script("arguments[0].click();", box)
-                time.sleep(0.3)
-                # Xoa het noi dung bang Ctrl+A -> Delete
-                box.send_keys(Keys.CONTROL + "a")
-                time.sleep(0.1)
-                box.send_keys(Keys.DELETE)
-                time.sleep(0.1)
-                # Nhap text qua WebDriver (React nhan duoc qua keyboard events)
-                box.send_keys(text)
-                time.sleep(0.5)
-                # Xac nhan React da nhan
-                enabled = _btn_enabled()
-                if enabled:
-                    self.log(f"OK (send_keys WebDriver): {text[:55]}...")
+                self.driver.execute_script("""
+                    arguments[0].focus();
+                    document.execCommand('selectAll', false, null);
+                    document.execCommand('delete', false, null);
+                """, box)
+                time.sleep(0.2)
+                for chunk in [text[i:i+80] for i in range(0, len(text), 80)]:
+                    box.send_keys(chunk)
+                    time.sleep(0.05)
+                time.sleep(0.4)
+                actual = self.driver.execute_script("return arguments[0].innerText;", box)
+                if actual and text[:30].lower() in actual.lower():
+                    self.log(f"✅ Đã nhập prompt (send_keys): {text[:60]}...")
                     return True
-                elif enabled is None:
-                    # Khong tim duoc button.bMhrec - kiem tra text trong box
-                    actual = (self.driver.execute_script(
-                        "return arguments[0].innerText||arguments[0].textContent;", box) or "").strip()
-                    if actual and text[:15] in actual:
-                        self.log(f"OK (send_keys, no btn check): {text[:55]}...")
-                        return True
-                self.log(f"PP1: button van disabled sau send_keys, thu Ctrl+V...")
+                self.log("⚠ send_keys: text không khớp, thử clipboard...")
             except Exception as e1:
-                self.log(f"PP1 send_keys loi: {e1}")
+                self.log(f"⚠ send_keys: {e1}")
 
-            # ── PP2: Ctrl+V sau khi set clipboard ────────────────────────────
-            if _to_clip(text):
-                try:
-                    self.driver.execute_script("arguments[0].click();", box)
-                    time.sleep(0.2)
-                    box.send_keys(Keys.CONTROL + "a")
-                    time.sleep(0.1)
-                    box.send_keys(Keys.CONTROL + "v")
-                    time.sleep(0.8)
-                    enabled = _btn_enabled()
-                    if enabled or enabled is None:
-                        actual = (self.driver.execute_script(
-                            "return arguments[0].innerText||arguments[0].textContent;", box) or "").strip()
-                        if enabled or (actual and text[:10] in actual):
-                            self.log(f"OK (Ctrl+V): {text[:55]}...")
-                            return True
-                    self.log("PP2 Ctrl+V: van khong oo, thu ActionChains...")
-                except Exception as e2:
-                    self.log(f"PP2 Ctrl+V loi: {e2}")
-
-            # ── PP3: ActionChains move_to_element + send_keys ─────────────────
+            # ── Phương pháp 2: Clipboard Ctrl+V ──
             try:
-                ActionChains(self.driver).move_to_element(box).click().perform()
-                time.sleep(0.3)
-                ActionChains(self.driver).key_down(Keys.CONTROL).send_keys(
-                    'a').key_up(Keys.CONTROL).send_keys(Keys.DELETE).perform()
-                time.sleep(0.15)
-                # Nhap tung chunk nho
-                for chunk in [text[i:i+40] for i in range(0, len(text), 40)]:
-                    ActionChains(self.driver).send_keys(chunk).perform()
-                    time.sleep(0.04)
+                _copy_to_clipboard(text)
+                self.driver.execute_script("""
+                    arguments[0].focus();
+                    document.execCommand('selectAll', false, null);
+                    document.execCommand('delete', false, null);
+                """, box)
+                time.sleep(0.2)
+                box.send_keys(Keys.CONTROL + "v")
+                time.sleep(0.8)
+                actual = self.driver.execute_script("return arguments[0].innerText;", box)
+                if actual and text[:30].lower() in actual.lower():
+                    self.log(f"✅ Đã dán prompt (Ctrl+V): {text[:60]}...")
+                    return True
+                self.log("⚠ Clipboard: text không xuất hiện, thử execCommand...")
+            except Exception as e2:
+                self.log(f"⚠ Clipboard: {e2}")
+
+            # ── Phương pháp 3: execCommand insertText (deprecated fallback) ──
+            try:
+                self.driver.execute_script("""
+                    arguments[0].focus();
+                    document.execCommand('selectAll', false, null);
+                    document.execCommand('delete', false, null);
+                    document.execCommand('insertText', false, arguments[1]);
+                """, box, text)
                 time.sleep(0.5)
-                enabled = _btn_enabled()
-                if enabled or enabled is None:
-                    self.log(f"OK (ActionChains): {text[:55]}...")
+                actual = self.driver.execute_script("return arguments[0].innerText;", box)
+                if actual and actual.strip():
+                    self.log(f"✅ Đã dán prompt (execCommand): {text[:60]}...")
                     return True
             except Exception as e3:
-                self.log(f"PP3 ActionChains loi: {e3}")
+                self.log(f"⚠ execCommand: {e3}")
 
-            # Last resort: cu try du button disabled
-            self.log("CANH BAO: tat ca PP fail, van thu generate (co the React chua cap nhat kip)")
-            return True  # Tra ve True de van click generate, neu fail se thay trong log
-
+            self.log("❌ Tất cả phương pháp đều thất bại")
+            return False
         except Exception as e:
-            self.log(f"set_prompt exception: {e}")
+            self.log(f"❌ set_prompt: {e}")
             return False
 
     def click_generate(self):
-        """Click button.bMhrec va xac nhan generation bat dau (button chuyen disabled)."""
+        """Click nút Tạo — chờ enabled + ActionChains + Enter fallback"""
         try:
-            time.sleep(1.0)
-            btn = None
-            for by, sel in [
+            # Chờ 1.5s sau khi paste để React cập nhật state
+            time.sleep(1.5)
+            # Bug 2 fixed: aria-label selector bền hơn class (không bị Google update)
+            btn_selectors = [
+                (By.XPATH, "//button[@aria-label='Generate' or @aria-label='Submit']"),
+                (By.XPATH, "//button[@aria-label='Tạo' or @aria-label='Gửi']"),
+                (By.XPATH, "//button[.//span[normalize-space()='arrow_forward'] or .//span[normalize-space()='send']]"),
+                (By.XPATH, "//button[.//mat-icon[contains(.,'arrow_forward')]]"),
+                # Fallback class (có thể đổi theo Google update)
                 (By.CSS_SELECTOR, "button.bMhrec"),
                 (By.XPATH, "//button[contains(@class,'bMhrec')]"),
-                (By.XPATH, "//button[.//span[contains(.,'arrow_forward')]]"),
-                (By.XPATH, "//button[@aria-label='Generate' or @aria-label='T\u1ea1o']"),
-            ]:
+            ]
+            btn = None
+            for by, sel in btn_selectors:
                 try:
                     el = self.driver.find_element(by, sel)
                     if el and el.is_displayed():
-                        btn = el; break
-                except: continue
-
-            if btn:
-                dis = btn.get_attribute("disabled") or btn.get_attribute("aria-disabled")
-                if dis and str(dis).lower() in ("true","disabled"):
-                    self.log("Nut Tao DISABLED — prompt chua vao React, khong click")
-                    return False
-
-                self.driver.execute_script(
-                    "arguments[0].scrollIntoView({block:'center'});", btn)
-                time.sleep(0.2)
-                try:
-                    ActionChains(self.driver).move_to_element(btn).click().perform()
-                    self.log("Click Tao (ActionChains)")
+                        btn = el
+                        break
                 except:
-                    self.driver.execute_script("arguments[0].click();", btn)
-                    self.log("Click Tao (JS click)")
-
-                # Xac nhan: sau 2s button phai chuyen sang disabled (dang generate)
-                time.sleep(2)
-                try:
-                    dis_after = btn.get_attribute("disabled") or btn.get_attribute("aria-disabled")
-                    if dis_after and str(dis_after).lower() in ("true","disabled"):
-                        self.log("XHAC NHAN: Flow dang generate!")
-                        return True
-                    else:
-                        self.log("WARNING: button khong disabled sau click — prompt co the trong")
-                except: pass
-                return True
-
-            # Fallback Enter
-            for by, sel in [(By.CSS_SELECTOR, "div.fyuIsy"),
-                            (By.CSS_SELECTOR, "div[role='textbox']")]:
-                try:
-                    box = self.driver.find_element(by, sel)
-                    if box and box.is_displayed():
-                        self.driver.execute_script("arguments[0].focus();", box)
-                        box.send_keys(Keys.RETURN)
-                        self.log("Enter -> generate (fallback)")
-                        return True
-                except: continue
-
-            self.log("THAT BAI click Generate")
-            return False
-        except Exception as e:
-            self.log(f"click_generate: {e}")
-            return False
-
-        """Click button.bMhrec (confirmed Flow generate button)."""
-        try:
-            time.sleep(1.0)
-            btn = None
-            for by, sel in [
-                (By.CSS_SELECTOR, "button.bMhrec"),
-                (By.XPATH, "//button[contains(@class,'bMhrec')]"),
-                (By.XPATH, "//button[.//span[contains(.,'arrow_forward')]]"),
-                (By.XPATH, "//button[@aria-label='Generate' or @aria-label='T\u1ea1o']"),
-            ]:
-                try:
-                    el = self.driver.find_element(by, sel)
-                    if el and el.is_displayed():
-                        btn = el; break
-                except: continue
+                    continue
 
             if btn:
+                # Kiểm tra button có bị disabled không
                 disabled = btn.get_attribute("disabled") or btn.get_attribute("aria-disabled")
-                if disabled and str(disabled).lower() in ("true","disabled"):
-                    self.log("Nut Tao bi disabled (prompt chua vao?)")
+                if disabled and str(disabled).lower() in ("true", "disabled"):
+                    self.log("⚠ Nút Tạo đang disabled — thử Enter key...")
                 else:
+                    # Scroll vào view + JS click để bypass overlay
                     self.driver.execute_script(
-                        "arguments[0].scrollIntoView({block:'center'});", btn)
-                    time.sleep(0.2)
+                        "arguments[0].scrollIntoView({block:'center'});", btn
+                    )
+                    time.sleep(0.3)
                     try:
+                        # Thử ActionChains trước
                         ActionChains(self.driver).move_to_element(btn).click().perform()
-                        self.log("Click nut Tao (ActionChains)")
-                    except:
+                        self.log("✅ Đã click nút Tạo (ActionChains)")
+                    except Exception:
+                        # Fallback JS click nếu bị intercept
                         self.driver.execute_script("arguments[0].click();", btn)
-                        self.log("Click nut Tao (JS click)")
-                    return True
+                        self.log("✅ Đã click nút Tạo (JS click)")
+                    time.sleep(0.5)
 
-            # Fallback Enter
-            for by, sel in [(By.CSS_SELECTOR, "div.fyuIsy"),
-                            (By.CSS_SELECTOR, "div[role='textbox']")]:
-                try:
-                    box = self.driver.find_element(by, sel)
-                    if box and box.is_displayed():
-                        self.driver.execute_script("arguments[0].focus();", box)
-                        box.send_keys(Keys.RETURN)
-                        self.log("Enter -> generate (fallback)")
+                    # Xác nhận click có hiệu lực bằng cách kiểm tra URL thay đổi
+                    url_before = self.driver.current_url
+                    time.sleep(2)
+                    url_after = self.driver.current_url
+                    if url_after != url_before or "/edit/" in url_after:
+                        self.log("✅ Xác nhận: trang đổi URL — generate đang chạy!")
                         return True
-                except: continue
+                    self.log("⚠ URL không đổi — thử Enter fallback...")
 
-            self.log("Khong click duoc Generate")
+            # Fallback: Enter trong ô prompt (cách đáng tin nhất với React)
+            try:
+                box = self.driver.find_element(By.CSS_SELECTOR, "div[role='textbox']")
+                # JS focus + Enter để tránh ElementClickInterceptedException
+                self.driver.execute_script("arguments[0].focus();", box)
+                time.sleep(0.3)
+                box.send_keys(Keys.RETURN)
+                self.log("⌨️ Sent Enter key → generate")
+                return True
+            except Exception as ef:
+                self.log(f"⚠ Enter fallback: {ef}")
+
+            # Fallback 2: JS tìm button phía phải ô prompt (tránh lỗi tọa độ)
+            try:
+                box = self.driver.find_element(By.CSS_SELECTOR, "div[role='textbox']")
+                clicked = self.driver.execute_script("""
+                    var box = arguments[0];
+                    var rect = box.getBoundingClientRect();
+                    var x = rect.right + 60, y = rect.top + rect.height / 2;
+                    var els = document.elementsFromPoint(x, y);
+                    for (var i = 0; i < els.length; i++) {
+                        if (els[i].tagName === 'BUTTON') {
+                            els[i].click();
+                            return els[i].className || 'button';
+                        }
+                    }
+                    return null;
+                """, box)
+                if clicked:
+                    self.log(f"🖱 JS click button phải input: {clicked[:30]}")
+                    return True
+            except Exception as e2:
+                self.log(f"⚠ JS coordinate click: {e2}")
+
+            # Bug 3 fixed: log cảnh báo thay vì im lặng return True
+            self.log("⚠ Tất cả phương pháp click generate đều thất bại!")
             return False
         except Exception as e:
-            self.log(f"click_generate: {e}")
+            self.log(f"❌ click_generate: {e}")
             return False
+
 
     def wait_for_video(self, timeout=300):
         """Chờ video tạo xong — chỉ check SUCCESS, không check error giả"""
@@ -709,48 +666,7 @@ class BrowserController:
         self.log(f"⏱ Timeout sau {timeout}s — tiếp prompt tiếp")
         return False
 
-    def wait_for_prompt_ready(self, timeout=90):
-        """
-        Cho nen button.bMhrec ENABLED (Flow hoan tat generate, san sang nhan prompt moi).
-        VA textbox trong/placeholder (khong con noi dung cu).
-        """
-        self.log("Cho Flow hoan tat va mo o nhap (toi da 90s)...")
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                btn = None
-                for by, sel in [
-                    (By.CSS_SELECTOR, "button.bMhrec"),
-                    (By.XPATH, "//button[contains(@class,'bMhrec')]"),
-                ]:
-                    try:
-                        el = self.driver.find_element(by, sel)
-                        if el and el.is_displayed():
-                            btn = el; break
-                    except: continue
-
-                if btn:
-                    dis = btn.get_attribute("disabled") or btn.get_attribute("aria-disabled")
-                    btn_enabled = not (dis and str(dis).lower() in ("true","disabled"))
-                    if btn_enabled:
-                        # Kiem tra textbox co trong khong
-                        try:
-                            box = self.driver.find_element(
-                                By.CSS_SELECTOR, "div.fyuIsy[contenteditable='true']")
-                            content = (self.driver.execute_script(
-                                "return arguments[0].innerText||\'\';" , box) or "").strip()
-                            if not content or len(content) < 3:
-                                self.log("O prompt trong san sang!")
-                                return True
-                        except:
-                            # Neu khong kiem tra duoc textbox, button enabled la du
-                            self.log("Button enabled, san sang!")
-                            return True
-            except: pass
-            time.sleep(3)
-        self.log("Timeout 90s — tiep tuc bat chap")
-        return False
-
+    def wait_for_prompt_ready(self, timeout=30):
         """Đợi ô prompt xuất hiện trở lại sau khi video render xong.
         Dùng để tiếp tục dán prompt mới mà không cần tạo project mới.
         Trả về True nếu ô prompt sẵn sàng.
