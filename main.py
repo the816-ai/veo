@@ -415,7 +415,10 @@ class BrowserController:
             return False
 
     def set_prompt(self, text):
-        """Nhap prompt vao div.fyuIsy (confirmed Flow DOM selector)."""
+        """
+        Nhap prompt vao Flow div.fyuIsy.
+        Su dung nhieu PP, kiem tra button.bMhrec khong bi disabled de xac nhan React da nhan.
+        """
         import subprocess, tempfile
 
         def _to_clip(t):
@@ -434,8 +437,24 @@ class BrowserController:
                 return True
             except: return False
 
+        def _btn_enabled():
+            """Kiem tra button.bMhrec co duoc enabled (React da nhan text) khong."""
+            try:
+                for by, sel in [
+                    (By.CSS_SELECTOR, "button.bMhrec"),
+                    (By.XPATH, "//button[contains(@class,'bMhrec')]"),
+                ]:
+                    try:
+                        btn = self.driver.find_element(by, sel)
+                        if btn and btn.is_displayed():
+                            dis = btn.get_attribute("disabled") or btn.get_attribute("aria-disabled")
+                            return not (dis and str(dis).lower() in ("true","disabled"))
+                    except: continue
+            except: pass
+            return None  # khong tim duoc button
+
         try:
-            # Selector xac nhan tren Flow DOM thuc te
+            # Tim o prompt
             box = None
             for by, sel in [
                 (By.CSS_SELECTOR, "div.fyuIsy[contenteditable='true']"),
@@ -449,45 +468,58 @@ class BrowserController:
                     if el and el.is_displayed():
                         box = el; break
                 except: continue
-
             if not box:
-                self.log("Khong tim thay o prompt (div.fyuIsy)")
+                self.log("Khong tim thay div.fyuIsy")
                 return False
 
             self.driver.execute_script(
                 "arguments[0].scrollIntoView({block:'center'});", box)
             time.sleep(0.2)
-            self.driver.execute_script("arguments[0].click();", box)
-            time.sleep(0.1)
 
-            # PP1: JS insertText — react nhan dung InputEvent
-            ok = self.driver.execute_script("""
-                var el = arguments[0], txt = arguments[1];
-                el.focus();
-                // Xoa noi dung trong p-tag (giu cau truc, React khong bi mat ref)
-                var p = el.querySelector('p');
-                if (p) {
-                    var range = document.createRange();
-                    range.selectNodeContents(p);
-                    var sel = window.getSelection();
-                    sel.removeAllRanges();
-                    sel.addRange(range);
-                } else {
+            # ── PP1: React nativeInputValueSetter via InputEvent ──────────────
+            try:
+                self.driver.execute_script("""
+                    var el = arguments[0], txt = arguments[1];
+                    el.focus();
+                    // Set noi dung truc tiep vao innerHTML (giu p-tag)
+                    el.innerHTML = '<p>' + txt.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</p>';
+                    // Dispatch InputEvent ma React lang nghe
+                    el.dispatchEvent(new InputEvent('input', {
+                        bubbles: true,
+                        cancelable: true,
+                        inputType: 'insertText',
+                        data: txt
+                    }));
+                    el.dispatchEvent(new Event('change', {bubbles:true}));
+                """, box, text)
+                time.sleep(0.5)
+                if _btn_enabled():
+                    self.log(f"OK (InputEvent+innerHTML): {text[:55]}...")
+                    return True
+                self.log("PP1 InputEvent: button van disabled, thu execCommand...")
+            except Exception as e1:
+                self.log(f"PP1 loi: {e1}")
+
+            # ── PP2: execCommand insertText ───────────────────────────────────
+            try:
+                self.driver.execute_script("""
+                    var el = arguments[0];
+                    el.focus();
                     document.execCommand('selectAll', false, null);
-                }
-                document.execCommand('delete', false, null);
-                // Nhap text moi
-                return document.execCommand('insertText', false, txt);
-            """, box, text)
-            time.sleep(0.35)
-            actual = (self.driver.execute_script(
-                "return arguments[0].innerText||arguments[0].textContent;", box) or "").strip()
-            if text[:20].strip().lower() in actual.lower():
-                self.log(f"OK (insertText JS): {text[:55]}...")
-                return True
-            self.log(f"insertText: actual='{actual[:35]}', thu Ctrl+V...")
+                    document.execCommand('delete', false, null);
+                """, box)
+                time.sleep(0.1)
+                ok = self.driver.execute_script(
+                    "return document.execCommand('insertText',false,arguments[0]);", text)
+                time.sleep(0.4)
+                if _btn_enabled():
+                    self.log(f"OK (execCommand insertText): {text[:55]}...")
+                    return True
+                self.log(f"PP2 insertText ok={ok}, button van disabled, thu Ctrl+V...")
+            except Exception as e2:
+                self.log(f"PP2 loi: {e2}")
 
-            # PP2: Ctrl+V
+            # ── PP3: Ctrl+V ───────────────────────────────────────────────────
             if _to_clip(text):
                 self.driver.execute_script("""
                     var el = arguments[0]; el.focus();
@@ -496,35 +528,45 @@ class BrowserController:
                 """, box)
                 time.sleep(0.15)
                 box.send_keys(Keys.CONTROL + "v")
-                time.sleep(0.7)
-                actual = (self.driver.execute_script(
-                    "return arguments[0].innerText||arguments[0].textContent;", box) or "").strip()
-                if text[:15].strip().lower() in actual.lower():
+                time.sleep(0.8)
+                if _btn_enabled():
                     self.log(f"OK (Ctrl+V): {text[:55]}...")
                     return True
-                self.log(f"Ctrl+V: actual='{actual[:35]}', thu send_keys...")
+                self.log("PP3 Ctrl+V: button van disabled, thu ActionChains...")
 
-            # PP3: ActionChains send_keys
+            # ── PP4: ActionChains typing ──────────────────────────────────────
             try:
-                ActionChains(self.driver).click(box).key_down(Keys.CONTROL).send_keys(
-                    'a').key_up(Keys.CONTROL).send_keys(Keys.DELETE).perform()
+                ActionChains(self.driver).click(box).key_down(Keys.CONTROL
+                    ).send_keys('a').key_up(Keys.CONTROL).send_keys(Keys.DELETE).perform()
                 time.sleep(0.15)
-                for chunk in [text[i:i+60] for i in range(0, len(text), 60)]:
+                for chunk in [text[i:i+50] for i in range(0, len(text), 50)]:
                     ActionChains(self.driver).send_keys(chunk).perform()
-                    time.sleep(0.04)
-                time.sleep(0.3)
-                actual = (self.driver.execute_script(
-                    "return arguments[0].innerText||arguments[0].textContent;", box) or "").strip()
-                if actual.strip():
+                    time.sleep(0.05)
+                time.sleep(0.4)
+                enabled = _btn_enabled()
+                if enabled:
                     self.log(f"OK (ActionChains): {text[:55]}...")
                     return True
-            except Exception as e3:
-                self.log(f"PP3 ActionChains loi: {e3}")
+                elif enabled is None:
+                    # Khong tim duoc button — cu tin la OK
+                    self.log(f"OK (ActionChains, no button check): {text[:55]}...")
+                    return True
+                self.log("PP4 ActionChains: button van disabled")
+            except Exception as e4:
+                self.log(f"PP4 loi: {e4}")
 
-            self.log("THAT BAI nhap prompt")
+            # Neu tat ca PP fail nhung text co trong box - cu chap nhan
+            actual = (self.driver.execute_script(
+                "return arguments[0].innerText||arguments[0].textContent;", box) or "").strip()
+            if actual and text[:10] in actual:
+                self.log(f"CANH BAO: button disabled nhung text co trong box - cu generate")
+                return True
+
+            self.log("THAT BAI nhap prompt - tat ca PP deu fail")
             return False
+
         except Exception as e:
-            self.log(f"set_prompt: {e}")
+            self.log(f"set_prompt exception: {e}")
             return False
 
     def click_generate(self):
