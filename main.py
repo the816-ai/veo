@@ -923,6 +923,99 @@ class BrowserController:
 
 
 
+    def get_download_ready_count(self):
+        """Đếm số video đã render xong (có nút Tải xuống) trên trang.
+        Dùng cho pipeline watcher."""
+        try:
+            btns = self.driver.find_elements(
+                By.XPATH,
+                "//button[normalize-space(.)='Tai xuong' or normalize-space(.)='Tải xuống' "
+                "or @aria-label='Download' or @aria-label='Tải xuống']"
+            )
+            visible = [b for b in btns if b.is_displayed()]
+            return len(visible)
+        except:
+            return 0
+
+    def click_all_downloads(self, save_dir, base_name, start_index=1):
+        """Click tất cả nút Tải xuống hiện có trên trang, lưu file theo thứ tự.
+        Trả về số video đã download thành công."""
+        os.makedirs(save_dir, exist_ok=True)
+        try:
+            self.driver.execute_cdp_cmd(
+                "Browser.setDownloadBehavior",
+                {"behavior": "allow", "downloadPath": save_dir}
+            )
+        except: pass
+
+        chrome_dl = str(Path.home() / "Downloads")
+        watch_dirs = list({save_dir, chrome_dl})
+
+        try:
+            btns = self.driver.find_elements(
+                By.XPATH,
+                "//button[normalize-space(.)='Tai xuong' or normalize-space(.)='Tải xuống' "
+                "or @aria-label='Download' or @aria-label='Tải xuống']"
+            )
+            btns = [b for b in btns if b.is_displayed()]
+        except:
+            return 0
+
+        downloaded = 0
+        for btn in btns:
+            snap = {d: set(os.listdir(d)) if os.path.exists(d) else set()
+                    for d in watch_dirs}
+            try:
+                ActionChains(self.driver).move_to_element(btn).click().perform()
+                self.log(f"   ⬇️ Click tải video #{start_index + downloaded}...")
+            except:
+                try:
+                    self.driver.execute_script("arguments[0].click();", btn)
+                except:
+                    continue
+
+            # Chờ file xuất hiện (tối đa 60s)
+            deadline = time.time() + 60
+            new_file = None
+            new_dir  = save_dir
+            while time.time() < deadline:
+                time.sleep(1.5)
+                for d in watch_dirs:
+                    if not os.path.exists(d): continue
+                    added = set(os.listdir(d)) - snap[d]
+                    done  = [f for f in added if f.endswith(".mp4")
+                              and not f.endswith(".crdownload")]
+                    if done:
+                        new_file = done[0]; new_dir = d; break
+                if new_file: break
+
+            if new_file:
+                # Chờ ổn định
+                src_path = os.path.join(new_dir, new_file)
+                for _ in range(8):
+                    time.sleep(1)
+                    try:
+                        sz1 = os.path.getsize(src_path)
+                        time.sleep(1)
+                        if os.path.getsize(src_path) == sz1 and sz1 > 0:
+                            break
+                    except: break
+                dst_name = f"{base_name}_{start_index + downloaded:02d}.mp4"
+                dst = os.path.join(save_dir, dst_name)
+                if os.path.exists(dst):
+                    dst = dst.replace(".mp4", f"_{int(time.time())%1000}.mp4")
+                try:
+                    shutil.move(src_path, dst)
+                    sz_mb = os.path.getsize(dst) / 1024 / 1024
+                    self.log(f"   ✅ Đã lưu: {dst_name} ({sz_mb:.1f} MB)")
+                    downloaded += 1
+                except Exception as e:
+                    self.log(f"   ⚠ Lưu file lỗi: {e}")
+            else:
+                self.log(f"   ⚠ Hết 60s, không tìm thấy file tải về")
+
+        return downloaded
+
 # ─── Màu nền tối chuyên nghiệp ───
 BG      = "#0D1117"   # nền chính
 CARD    = "#161B22"   # card/frame
@@ -2448,7 +2541,7 @@ class VeoApp:
         self._btn(btn_row, "  ▶  START — Tuần tự + Tải về",
                   self._start_text2video, color=GREEN
                   ).pack(side=LEFT, fill=X, expand=True, ipady=9, padx=(0,4))
-        self._btn(btn_row, "  ⚡  RAPID — Submit nhanh, render song song",
+        self._btn(btn_row, "  ⚡  PIPELINE — Submit + tải nền song song",
                   self._start_rapid, color=ORANGE
                   ).pack(side=LEFT, fill=X, expand=True, ipady=9, padx=(0,4))
         self._btn(btn_row, "  ⏹  STOP",
@@ -2692,118 +2785,138 @@ class VeoApp:
             return
         out_dir = self.tv_out.get()
         os.makedirs(out_dir, exist_ok=True)
-        self.log(f"⚡ RAPID MODE [{mode}]: Submit {len(parsed)} prompt(s) nhanh → render song song!")
+        self.log(f"⚡ PIPELINE MODE [{mode}]: Submit {len(parsed)} prompt(s) pipeline (submit + watcher)!")
         self.nb.select(5)
         self._run_bg(lambda: self._rapid_worker(parsed, out_dir))
 
-    def _rapid_worker(self, lines, out_dir):
-        """Submit tất cả nhanh (30s/prompt), rồi monitor download folder"""
+    def _pipeline_worker(self, lines, out_dir):
+        """
+        PIPELINE MODE:
+          Thread 1 (main): paste prompt → generate → delay → paste tiếp (không chờ video)
+          Thread 2 (watcher): cứ 2s scan DOM, phát hiện nút "Tải xuống" mới → tự download
+        """
         self.running = True
         self.root.after(0, self.tv_progress.start)
-        import random
+        import random, threading
 
-        # ─── PHASE 1: Submit tất cả prompt nhanh ───
-        total = len(lines)
-        submitted = 0
+        total      = len(lines)
+        base_name  = self.tv_base.get()
+        submitted  = 0
+        dl_counter = [1]           # shared counter, protected by lock
+        dl_lock    = threading.Lock()
+        watcher_stop = threading.Event()
+
+        self.log(f"\n🚀 PIPELINE MODE: {total} prompt(s) — submit + download song song")
+
+        # ─── WATCHER THREAD ────────────────────────────────────────────────
+        def dom_watcher():
+            """Chạy nền: 2s/lần, phát hiện nút Tải xuống mới → auto download."""
+            last_dl_count = 0
+            self.log("   👁 DOM Watcher đã khởi động — đang theo dõi...")
+            while not watcher_stop.is_set():
+                try:
+                    current_count = self.bc.get_download_ready_count()
+                    if current_count > last_dl_count:
+                        new_videos = current_count - last_dl_count
+                        self.log(f"   🔔 Watcher: phát hiện {new_videos} video mới sẵn sàng tải!")
+                        with dl_lock:
+                            idx = dl_counter[0]
+                        downloaded = self.bc.click_all_downloads(
+                            out_dir, base_name, start_index=idx
+                        )
+                        with dl_lock:
+                            dl_counter[0] += downloaded
+                        last_dl_count = self.bc.get_download_ready_count()
+                        self.root.after(0, lambda d=dl_counter[0]-1, t=total:
+                            self.tv_status_lbl.config(
+                                text=f"📥 Đã tải {d}/{t} video"))
+                except Exception as e:
+                    pass  # Watcher không được crash
+                # Chờ 2s, nhưng check stop event mỗi 0.5s để dừng nhanh
+                for _ in range(4):
+                    if watcher_stop.is_set(): break
+                    time.sleep(0.5)
+
+        watcher_thread = threading.Thread(target=dom_watcher, daemon=True)
+        watcher_thread.start()
+
+        # ─── MAIN LOOP: Submit nhanh ────────────────────────────────────────
         try:
+            delay_map = {"normal": 8, "double": 15, "random": None}
+            d_val = delay_map.get(self.tv_delay.get(), 8)
+
             for i, item in enumerate(lines, 1):
                 if not self.running: break
                 prompt_text, aspect_ratio, duration, meta = item
                 if not prompt_text:
-                    self.log(f"   ⚠ Prompt rỗng tại vị trí {i} — bỏ qua")
+                    self.log(f"   ⚠ Prompt #{i} rỗng — bỏ qua")
                     continue
-                self.log(f"\n⚡ [{i}/{total}] Submit: {prompt_text[:60]}...")
-                self.root.after(0, lambda i=i, t=total: self.tv_status_lbl.config(
-                    text=f"⚡ Submit {i}/{t} — render song song trên cloud..."))
 
-                # Bug 11 fixed: chỉ tạo project MỚI cho prompt đầu tiên
-                # Các prompt tiếp theo tái dùng project (nhanh hơn nhiều)
+                self.log(f"\n⚡ [{i}/{total}] Submit: {prompt_text[:65]}...")
+                self.root.after(0, lambda i=i, t=total:
+                    self.tv_status_lbl.config(
+                        text=f"⚡ Submit {i}/{t} — watcher đang tải về nền..."))
+
+                # Tạo project chỉ lần đầu
                 if i == 1:
                     ok = self.bc.new_project()
-                    if not ok: continue
-                    self.log("🆕 Đã tạo project mới cho RAPID mode")
+                    if not ok:
+                        self.log("❌ Không tạo được project — dừng pipeline")
+                        break
+                    self.log("🆕 Project đã tạo")
                 else:
-                    ready = self.bc.wait_for_prompt_ready(timeout=20)
-                    if not ready:
-                        self.log(f"   ⚠ Prompt chưa sẵn sàng, thử submit vẫn")
+                    # Chờ ô prompt sẵn sàng (≤20s)
+                    self.bc.wait_for_prompt_ready(timeout=20)
 
                 if aspect_ratio and aspect_ratio != "16:9":
                     self.bc.set_aspect_ratio(aspect_ratio)
 
                 ok = self.bc.set_prompt(prompt_text)
-                if not ok: continue
+                if not ok:
+                    self.log(f"   ⚠ Dán prompt #{i} thất bại — bỏ qua")
+                    continue
 
                 ok = self.bc.click_generate()
                 if ok:
                     submitted += 1
-                    self.log(f"   ✅ Đã submit #{i}")
+                    self.log(f"   ✅ Submit #{i} thành công")
                 else:
                     self.log(f"   ⚠ Submit #{i} thất bại")
 
-                # Chờ 30s giữa các prompt (đủ để Flow nhận request)
                 if i < total and self.running:
-                    for _ in range(30):
+                    delay = d_val if d_val is not None else random.randint(6, 15)
+                    self.log(f"   ⏳ Chờ {delay}s rồi submit tiếp...")
+                    # Chờ theo từng giây để có thể dừng sớm
+                    for _ in range(delay):
                         if not self.running: break
                         time.sleep(1)
 
         except Exception as e:
-            self.log(f"❌ Submit error: {e}")
+            self.log(f"❌ Pipeline submit error: {e}")
 
-        self.log(f"\n⚡ Đã submit {submitted}/{total} prompt. Bắt đầu monitor download...")
+        self.log(f"\n✅ Submit xong {submitted}/{total} prompt — watcher đang tải nốt...")
+
+        # ─── Chờ watcher tải hết (tối đa 10 phút sau prompt cuối) ──────────
         self.root.after(0, lambda: self.tv_status_lbl.config(
-            text=f"📥 Đang chờ {submitted} video từ cloud..."))
-
-        # ─── PHASE 2: Monitor folder, đổi tên tuần tự khi file về ───
-        if submitted == 0:
-            self.running = False
-            self.root.after(0, self.tv_progress.stop)
-            return
-
-        # Bug 5 fixed: Chrome tải về ~/Downloads, phải monitor cả 2 folder
-        chrome_dl = str(Path.home() / "Downloads")
-        monitor_dirs = list({out_dir, chrome_dl})
-        snap = {d: set(os.listdir(d)) if os.path.exists(d) else set() for d in monitor_dirs}
-        base = self.tv_base.get()
-        video_counter = 1
-        # Tính video_counter tiếp theo (tránh ghi đè file cũ)
-        while os.path.exists(os.path.join(out_dir, f"{base}_{video_counter:02d}.mp4")):
-            video_counter += 1
-
-        deadline = time.time() + submitted * 600  # 10 phút/video tối đa
-        found = 0
-        prev_size_map = {}  # {filename: size}
-
-        while time.time() < deadline and found < submitted and self.running:
+            text=f"📥 Đang tải video cuối cùng..."))
+        wait_deadline = time.time() + 600
+        while time.time() < wait_deadline and self.running:
+            with dl_lock:
+                done = dl_counter[0] - 1
+            if done >= submitted:
+                break
             time.sleep(3)
-            try:
-                # Bug 5 fixed: scan ca hai folder
-                for _mdir in monitor_dirs:
-                    if not os.path.exists(_mdir): continue
-                    current = set(os.listdir(_mdir))
-                    added = current - snap.get(_mdir, set())
-                    new_mp4s = sorted([f for f in added
-                                       if f.endswith('.mp4') and not f.endswith('.crdownload')])
-                    for fname in new_mp4s:
-                        _fp = os.path.join(_mdir, fname)
-                        sz = os.path.getsize(_fp) if os.path.exists(_fp) else 0
-                        if prev_size_map.get(fname) == sz and sz > 0:
-                            dst_name = f"{base}_{video_counter:02d}.mp4"
-                            dst = os.path.join(out_dir, dst_name)
-                            if not os.path.exists(dst):
-                                shutil.move(_fp, dst)
-                                sz_mb = os.path.getsize(dst) / 1024 / 1024
-                                self.log(f"Tai ve #{video_counter}: {dst_name} ({sz_mb:.1f} MB)")
-                                snap.setdefault(_mdir, set()).add(dst_name)
-                                video_counter += 1
-                                found += 1
-                                self.root.after(0, lambda f=found, s=submitted:
-                                    self.tv_status_lbl.config(text=f"Da nhan {f}/{s} video"))
-                        else:
-                            prev_size_map[fname] = sz
-            except Exception as e:
-                self.log(f"Monitor: {e}")
 
-        self.log(f"\n✅ RAPID xong! Nhận {found}/{submitted} video → {out_dir}")
+        # Dừng watcher
+        watcher_stop.set()
+        watcher_thread.join(timeout=5)
+
+        with dl_lock:
+            final_count = dl_counter[0] - 1
+        self.running = False
+        self.root.after(0, self.tv_progress.stop)
+        self.root.after(0, lambda: self.tv_status_lbl.config(text=""))
+        self.log(f"\n🏁 PIPELINE hoàn tất! Đã tải {final_count}/{submitted} video → {out_dir}")
 
     # ── TAB 4: Nhân Vật ─────────────────────────────────
     def _tab_char_setup(self):
@@ -3329,133 +3442,171 @@ class VeoApp:
 
     # ── TAB 7: Ghép Video ───────────────────────────────
     def _tab_merge(self):
-        f = Frame(self.nb, bg=BG)
-        self.nb.add(f, text="🎬  Ghép Video")
+        outer, f = self._scrollable_frame(self.nb)
+        self.nb.add(outer, text="🎬  Ghép Video")
 
+        # Header
         hf = Frame(f, bg="#0A0F1A"); hf.pack(fill=X)
-        Label(hf, text="🎬  Ghép nhiều video thành 1 file",
+        Label(hf, text="🎬  GHÉP VIDEO — PIPELINE BATCH",
               font=("Segoe UI", 12, "bold"), bg="#0A0F1A", fg=ACCENT
               ).pack(anchor=W, padx=16, pady=10)
-        Label(hf, text="Yêu cầu: FFmpeg đã cài trong PATH  |  Tải tại: ffmpeg.org",
+        Label(hf, text="Yêu cầu: FFmpeg đã cài trong PATH  |  Thêm nhiều job → chạy tuần tự nền",
               font=("Segoe UI", 9), bg="#0A0F1A", fg=MUTED).pack(anchor=W, padx=16, pady=(0,10))
 
-        info = self._card(f, "ℹ️ Thông tin công cụ")
-        info.pack(fill=X, padx=12, pady=(10,5))
-        Label(info, text=(
-            "• Ghép các file MP4 trong một thư mục thành 1 video duy nhất\n"
-            "• Sắp xếp theo tên file (video_01, video_02, ...)\n"
-            "• Sử dụng FFmpeg concat — giữ nguyên chất lượng gốc (không re-encode)"
-        ), bg=CARD, fg=TEXT, font=("Segoe UI", 9), justify=LEFT).pack(anchor=W, padx=10, pady=8)
+        # ── Queue panel ──
+        qf = self._card(f, "📋 Hàng chờ ghép  (Batch Queue)")
+        qf.pack(fill=BOTH, expand=True, padx=12, pady=(10,4))
 
-        self._btn(f, "  ▶  MỞ CÔNG CỤ GHÉP VIDEO",
-                  self._open_merger_window, color=GREEN
-                  ).pack(pady=16, ipady=10, ipadx=30)
+        self.mg_queue_list = scrolledtext.ScrolledText(
+            qf, height=9, font=("Consolas", 9), state=DISABLED,
+            bg="#0D1117", fg=TEXT, relief="flat")
+        self.mg_queue_list.pack(fill=BOTH, expand=True, padx=4, pady=4)
 
-    def _open_merger_window(self):
-        win = Toplevel(self.root)
-        win.title("Video Merger Tool")
-        win.geometry("560x480")
-        win.resizable(False, False)
-        win.configure(bg=BG)
+        # Nút thêm / xóa job
+        qa = Frame(qf, bg=CARD); qa.pack(fill=X, padx=4, pady=(0,6))
+        self._btn(qa, "  ➕  Thêm Job Ghép", self._mg_add_job, color=ACCENT
+                  ).pack(side=LEFT, ipady=6, ipadx=6, padx=(0,4))
+        self._btn(qa, "  🗑  Xóa hết", self._mg_clear_queue, color="#444C56"
+                  ).pack(side=LEFT, ipady=6, ipadx=6)
+        self.mg_job_count = Label(qa, text="0 job", bg=CARD, fg=MUTED,
+                                   font=("Segoe UI", 9))
+        self.mg_job_count.pack(side=RIGHT, padx=8)
 
-        Label(win, text="🎬 GHÉP VIDEO TOOL", bg=BG, fg=ACCENT, font=("Segoe UI", 13, "bold")).pack(pady=10)
+        # ── Cài đặt chung ──
+        sf = self._card(f, "⚙️ Cài đặt tên output")
+        sf.pack(fill=X, padx=12, pady=4)
+        sr = Frame(sf, bg=CARD); sr.pack(fill=X, padx=8, pady=6)
+        Label(sr, text="Tên file output:", bg=CARD, fg=MUTED,
+              font=("Segoe UI", 9)).pack(side=LEFT)
+        self.mg_fname = Entry(sr, width=28, font=("Segoe UI", 9),
+                               bg="#0D1117", fg=TEXT, insertbackground=TEXT, relief="flat")
+        self.mg_fname.insert(0, "video_ghep.mp4")
+        self.mg_fname.pack(side=LEFT, padx=6, ipady=3)
+        Label(sr, text="(mỗi job tự thêm _01, _02...)", bg=CARD, fg=MUTED,
+              font=("Segoe UI", 8)).pack(side=LEFT)
 
-        # Chọn folder
-        f1 = LabelFrame(win, text="Chọn Folder Chứa Video", padx=8, pady=5)
-        f1.pack(fill=X, padx=15, pady=6)
-        folder_var = StringVar()
-        fr = Frame(f1); fr.pack(fill=X)
-        Entry(fr, textvariable=folder_var, width=40).pack(side=LEFT, padx=4)
-        def browse_folder():
-            d = filedialog.askdirectory()
-            if d:
-                folder_var.set(d)
-                vids = sorted(Path(d).glob("*.mp4"))
-                vid_list.config(state=NORMAL)
-                vid_list.delete("1.0", END)
-                for v in vids:
-                    vid_list.insert(END, f"{v.name}\n")
-                vid_list.config(state=DISABLED)
-        Button(fr, text="Chọn Folder", bg=ACCENT, fg="white",
-               command=browse_folder).pack(side=LEFT)
+        # ── Progress ──
+        self.mg_progress = ttk.Progressbar(f, mode="indeterminate", style="TProgressbar")
+        self.mg_progress.pack(fill=X, padx=12, pady=(6,2))
+        self.mg_status = Label(f, text="Chưa có job nào", font=("Segoe UI", 9), bg=BG, fg=MUTED)
+        self.mg_status.pack()
 
-        # Danh sách video
-        f2 = LabelFrame(win, text="Danh Sách Video", padx=8, pady=5)
-        f2.pack(fill=BOTH, expand=True, padx=15, pady=4)
-        vid_list = scrolledtext.ScrolledText(f2, height=8, font=("Consolas", 9), state=DISABLED)
-        vid_list.pack(fill=BOTH, expand=True)
+        # ── Nút chạy ──
+        bf = Frame(f, bg=BG); bf.pack(fill=X, padx=12, pady=8)
+        self._btn(bf, "  ▶  CHẠY TẤT CẢ JOB  (Pipeline)",
+                  self._mg_run_all, color=GREEN
+                  ).pack(side=LEFT, fill=X, expand=True, ipady=9, padx=(0,4))
+        self._btn(bf, "  ⏹  STOP", self._mg_stop, color=RED
+                  ).pack(side=LEFT, ipady=9, ipadx=8)
 
-        # Output
-        f3 = LabelFrame(win, text="Nơi Lưu File & Tên Output", padx=8, pady=5)
-        f3.pack(fill=X, padx=15, pady=4)
-        r = Frame(f3); r.pack(fill=X)
-        Label(r, text="Lưu vào:").pack(side=LEFT)
-        out_dir_var = StringVar()
-        Entry(r, textvariable=out_dir_var, width=36).pack(side=LEFT, padx=4)
-        Button(r, text="Chọn", command=lambda: out_dir_var.set(filedialog.askdirectory() or out_dir_var.get())
-               ).pack(side=LEFT, bg=ACCENT, fg="white")
-        r2 = Frame(f3); r2.pack(fill=X, pady=3)
-        Label(r2, text="Tên file:").pack(side=LEFT)
-        fname_var = StringVar(value="video_ghep.mp4")
-        Entry(r2, textvariable=fname_var, width=30).pack(side=LEFT, padx=4)
+        # Internal state
+        self._mg_jobs   = []   # list of (folder, out_dir, fname)
+        self._mg_running = False
 
-        # Progress
-        m_prog = ttk.Progressbar(win, mode="indeterminate")
-        m_prog.pack(fill=X, padx=15, pady=4)
-        m_status = Label(win, text="Vui lòng chọn folder chứa video")
-        m_status.pack()
+    def _mg_add_job(self):
+        """Thêm 1 job ghép vào queue."""
+        folder = filedialog.askdirectory(title="Chọn folder chứa video MP4 cần ghép")
+        if not folder: return
+        out_dir = filedialog.askdirectory(title="Chọn nơi lưu video ghép")
+        if not out_dir: out_dir = folder
+        fname_base = self.mg_fname.get().strip() or "video_ghep"
+        fname_base = fname_base.replace(".mp4", "")
+        idx = len(self._mg_jobs) + 1
+        fname = f"{fname_base}_{idx:02d}.mp4"
+        self._mg_jobs.append((folder, out_dir, fname))
+        self._mg_refresh_queue()
 
-        def do_merge():
-            folder = folder_var.get()
-            if not folder:
-                messagebox.showerror("Lỗi", "Chưa chọn folder!")
-                return
-            out_d = out_dir_var.get() or folder
-            fname = fname_var.get() or "video_ghep.mp4"
-            out_path = str(Path(out_d) / fname)
+    def _mg_clear_queue(self):
+        self._mg_jobs.clear()
+        self._mg_refresh_queue()
 
+    def _mg_refresh_queue(self):
+        """Cập nhật hiển thị danh sách job."""
+        self.mg_queue_list.config(state=NORMAL)
+        self.mg_queue_list.delete("1.0", END)
+        for idx, (folder, out_dir, fname) in enumerate(self._mg_jobs, 1):
+            vids = list(Path(folder).glob("*.mp4"))
+            self.mg_queue_list.insert(END,
+                f"[{idx}] {fname}\n"
+                f"     IN : {folder}  ({len(vids)} MP4)\n"
+                f"     OUT: {out_dir}\n\n")
+        self.mg_queue_list.config(state=DISABLED)
+        self.mg_job_count.config(text=f"{len(self._mg_jobs)} job")
+
+    def _mg_stop(self):
+        self._mg_running = False
+        self.log("⏹ Đã gửi lệnh dừng batch merge")
+
+    def _mg_run_all(self):
+        """Chạy toàn bộ queue ghép video theo pipeline (tuần tự, chạy nền)."""
+        if self._mg_running:
+            messagebox.showwarning("Đang chạy", "Batch merge đang chạy! Nhấn STOP trước.")
+            return
+        if not self._mg_jobs:
+            messagebox.showerror("Lỗi", "Chưa có job nào! Bấm ➕ Thêm Job trước.")
+            return
+        self.nb.select(5)  # Logs tab
+        import threading
+        threading.Thread(target=self._mg_batch_worker,
+                         args=(list(self._mg_jobs),), daemon=True).start()
+
+    def _mg_batch_worker(self, jobs):
+        """Worker ghép video — chạy từng job theo thứ tự."""
+        self._mg_running = True
+        self.root.after(0, self.mg_progress.start)
+        total = len(jobs)
+        done  = 0
+        self.log(f"\n🎬 BATCH MERGE bắt đầu: {total} job(s)")
+
+        for idx, (folder, out_dir, fname) in enumerate(jobs, 1):
+            if not self._mg_running: break
+            out_path = str(Path(out_dir) / fname)
             vids = sorted(Path(folder).glob("*.mp4"))
+
+            self.log(f"\n▶ Job [{idx}/{total}]: ghép {len(vids)} video → {fname}")
+            self.root.after(0, lambda i=idx, t=total, f=fname:
+                self.mg_status.config(
+                    text=f"⏳ Job {i}/{t}: {f}", fg=ORANGE))
+
             if not vids:
-                messagebox.showerror("Lỗi", "Không có file MP4 trong folder!")
-                return
+                self.log(f"   ⚠ Không có file MP4 trong: {folder}")
+                continue
 
+            # Viết file list
             list_file = str(Path(folder) / "_merge_list.txt")
-            with open(list_file, "w", encoding="utf-8") as lf:
-                for v in vids:
-                    lf.write(f"file '{v}'\n")
+            try:
+                with open(list_file, "w", encoding="utf-8") as lf:
+                    for v in vids:
+                        lf.write(f"file '{str(v).replace(chr(92), '/')}'" + "\n")
+            except Exception as e:
+                self.log(f"   ❌ Không viết được list file: {e}")
+                continue
 
-            m_prog.start()
-            m_status.config(text=f"Đang ghép {len(vids)} video...")
+            # Chạy FFmpeg
+            try:
+                import subprocess
+                cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                       "-i", list_file, "-c", "copy", out_path]
+                self.log(f"   ⚙ FFmpeg: {' '.join(cmd[-4:])}")
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                if res.returncode == 0:
+                    sz = os.path.getsize(out_path) / 1024 / 1024
+                    self.log(f"   ✅ Xong: {out_path} ({sz:.1f} MB)")
+                    done += 1
+                else:
+                    self.log(f"   ❌ FFmpeg lỗi: {res.stderr[:300]}")
+            except FileNotFoundError:
+                self.log("   ❌ FFmpeg chưa cài! Tải tại: https://ffmpeg.org")
+                break
+            except Exception as e:
+                self.log(f"   ❌ Lỗi: {e}")
 
-            def run():
-                try:
-                    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                           "-i", list_file, "-c", "copy", out_path]
-                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-                    if res.returncode == 0:
-                        win.after(0, lambda: m_prog.stop())
-                        win.after(0, lambda: m_status.config(text=f"✅ Xong! → {out_path}"))
-                        win.after(0, lambda: messagebox.showinfo("✅ Done", f"Ghép xong!\n{out_path}"))
-                    else:
-                        err = res.stderr[:500]
-                        win.after(0, lambda: m_prog.stop())
-                        win.after(0, lambda: m_status.config(text="❌ Lỗi FFmpeg"))
-                        win.after(0, lambda: messagebox.showerror("Lỗi", f"FFmpeg error:\n{err}"))
-                except FileNotFoundError:
-                    win.after(0, lambda: m_prog.stop())
-                    win.after(0, lambda: m_status.config(text="❌ FFmpeg không có trong PATH"))
-                    win.after(0, lambda: messagebox.showerror("Lỗi", "FFmpeg chưa được cài!\nTải tại: https://ffmpeg.org"))
-                except Exception as e:
-                    _e = str(e)
-                    win.after(0, lambda: m_prog.stop())
-                    win.after(0, lambda: m_status.config(text=f"❌ {_e}"))
-            threading.Thread(target=run, daemon=True).start()
+        self._mg_running = False
+        self.root.after(0, self.mg_progress.stop)
+        status = f"✅ Hoàn tất {done}/{total} job" if done == total else f"⚠ {done}/{total} job thành công"
+        self.root.after(0, lambda s=status: self.mg_status.config(text=s, fg=GREEN if done==total else ORANGE))
+        self.log(f"\n🏁 BATCH MERGE xong! {done}/{total} job thành công.")
 
-        Button(win, text="▶ GHÉP VIDEO", bg=GREEN, fg="white",
-               font=("Segoe UI", 11, "bold"), command=do_merge
-               ).pack(fill=X, padx=15, pady=8, ipady=8)
-
-    # ─── HELPERS ────────────────────────────
     def _browse(self, entry_widget):
         d = filedialog.askdirectory()
         if d:
