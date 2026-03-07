@@ -215,7 +215,7 @@ class BrowserController:
         """Tạo dự án mới trên Flow"""
         try:
             self.driver.get(FLOW_URL)
-            time.sleep(3)
+            time.sleep(4)
             # Selector đã xác nhận: button.jsIRVP hoặc text 'Dự án mới'
             try:
                 btn = WebDriverWait(self.driver, 10).until(
@@ -394,116 +394,143 @@ class BrowserController:
             return False
 
     def set_prompt(self, text):
-        """Nhập prompt vào Flow — clipboard paste (trigger real React paste event)"""
+        """Nhập prompt vào ô textbox trên Flow — hỗ trợ React UI."""
         import subprocess, tempfile
 
-        def _copy_to_clipboard(t):
-            """Copy text vào Windows clipboard qua PowerShell — safe với path bất kỳ"""
+        def _clipboard_paste(t):
+            """Ghi vào clipboard qua PowerShell (UTF-8 safe)."""
             try:
-                # Ghi ra file tạm với encoding UTF-8
                 tmp = tempfile.NamedTemporaryFile(
-                    mode='w', suffix='.txt', delete=False, encoding='utf-8'
-                )
+                    mode='w', suffix='.txt', delete=False, encoding='utf-8')
                 tmp.write(t); tmp.close()
-                # Dùng đường dẫn an toàn qua biến PS (tránh lỗi ký tự đặc biệt)
                 subprocess.run(
                     ["powershell", "-Command",
-                     "$p = [System.IO.Path]::GetFullPath($args[0]);"
-                     "Set-Clipboard -Value ([System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8))",
-                     tmp.name],
-                    capture_output=True, timeout=8
-                )
+                     "$p=[System.IO.Path]::GetFullPath($args[0]);"
+                     "Set-Clipboard -Value ([System.IO.File]::ReadAllText($p,"
+                     "[System.Text.Encoding]::UTF8))", tmp.name],
+                    capture_output=True, timeout=8)
                 try: os.unlink(tmp.name)
                 except: pass
+                return True
             except Exception as ce:
-                self.log(f"⚠ Clipboard error: {ce}")
+                self.log(f"Clipboard error: {ce}")
+                return False
+
+        def _react_set_value(el, val):
+            """Set value vào React-controlled input/div bằng JS nativeInput setter."""
+            try:
+                self.driver.execute_script("""
+                    var el = arguments[0], val = arguments[1];
+                    var nativeInput = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value') ||
+                        Object.getOwnPropertyDescriptor(
+                        window.HTMLTextAreaElement.prototype, 'value');
+                    if (nativeInput && nativeInput.set) {
+                        nativeInput.set.call(el, val);
+                    } else {
+                        el.textContent = val;
+                    }
+                    el.dispatchEvent(new Event('input', {bubbles:true}));
+                    el.dispatchEvent(new Event('change', {bubbles:true}));
+                """, el, val)
+                return True
+            except:
+                return False
 
         try:
-            # Chờ ô prompt thực sự clickable
+            # ── Tìm ô nhập prompt (nhiều selector theo ưu tiên) ──────────────
             box = None
-            for sel in ["div.fyuIsy[role='textbox']", "div[role='textbox']",
-                        "div[contenteditable='true']"]:
+            selectors = [
+                (By.CSS_SELECTOR, "div[role='textbox']"),
+                (By.CSS_SELECTOR, "div[contenteditable='true'][aria-multiline='true']"),
+                (By.XPATH, "//div[@contenteditable='true' and @role='textbox']"),
+                (By.CSS_SELECTOR, "div[contenteditable='true']"),
+                (By.CSS_SELECTOR, "textarea"),
+            ]
+            for by, sel in selectors:
                 try:
-                    box = WebDriverWait(self.driver, 15).until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
-                    )
-                    if box and box.is_displayed():
+                    el = WebDriverWait(self.driver, 12).until(
+                        EC.element_to_be_clickable((by, sel)))
+                    if el and el.is_displayed():
+                        box = el
                         break
-                    box = None
                 except:
                     continue
 
             if not box:
-                self.log("❌ Không tìm thấy ô prompt (15s timeout)")
+                self.log("Khong tim thay o prompt sau 12s")
                 return False
 
-            # Scroll vào giữa màn hình + JS focus (tránh overlay chặn click)
+            # Scroll vào view + click
             self.driver.execute_script(
-                "arguments[0].scrollIntoView({block:'center', inline:'center'});", box
-            )
-            time.sleep(0.5)
-            self.driver.execute_script("arguments[0].click();", box)
+                "arguments[0].scrollIntoView({block:'center'});", box)
             time.sleep(0.3)
+            self.driver.execute_script("arguments[0].click();", box)
+            time.sleep(0.2)
 
-            # ── Phương pháp 1: send_keys từng chunk — đáng tin nhất với React ──
-            try:
+            # ── PP1: Clipboard Ctrl+V (nhanh nhất, giữ ký tự đặc biệt) ──────
+            if _clipboard_paste(text):
                 self.driver.execute_script("""
                     arguments[0].focus();
-                    document.execCommand('selectAll', false, null);
-                    document.execCommand('delete', false, null);
+                    document.execCommand('selectAll',false,null);
+                    document.execCommand('delete',false,null);
                 """, box)
-                time.sleep(0.2)
-                for chunk in [text[i:i+80] for i in range(0, len(text), 80)]:
-                    box.send_keys(chunk)
-                    time.sleep(0.05)
-                time.sleep(0.4)
-                actual = self.driver.execute_script("return arguments[0].innerText;", box)
-                if actual and text[:30].lower() in actual.lower():
-                    self.log(f"✅ Đã nhập prompt (send_keys): {text[:60]}...")
-                    return True
-                self.log("⚠ send_keys: text không khớp, thử clipboard...")
-            except Exception as e1:
-                self.log(f"⚠ send_keys: {e1}")
-
-            # ── Phương pháp 2: Clipboard Ctrl+V ──
-            try:
-                _copy_to_clipboard(text)
-                self.driver.execute_script("""
-                    arguments[0].focus();
-                    document.execCommand('selectAll', false, null);
-                    document.execCommand('delete', false, null);
-                """, box)
-                time.sleep(0.2)
+                time.sleep(0.15)
                 box.send_keys(Keys.CONTROL + "v")
-                time.sleep(0.8)
-                actual = self.driver.execute_script("return arguments[0].innerText;", box)
-                if actual and text[:30].lower() in actual.lower():
-                    self.log(f"✅ Đã dán prompt (Ctrl+V): {text[:60]}...")
+                time.sleep(0.6)
+                actual = self.driver.execute_script(
+                    "return arguments[0].innerText || arguments[0].value;", box) or ""
+                if text[:20].lower() in actual.lower():
+                    self.log(f"Nhap OK (Ctrl+V): {text[:50]}...")
                     return True
-                self.log("⚠ Clipboard: text không xuất hiện, thử execCommand...")
-            except Exception as e2:
-                self.log(f"⚠ Clipboard: {e2}")
+                self.log("Ctrl+V khong ra ket qua, thu send_keys...")
 
-            # ── Phương pháp 3: execCommand insertText (deprecated fallback) ──
+            # ── PP2: send_keys từng ký tự + React event ──────────────────────
             try:
                 self.driver.execute_script("""
                     arguments[0].focus();
-                    document.execCommand('selectAll', false, null);
-                    document.execCommand('delete', false, null);
-                    document.execCommand('insertText', false, arguments[1]);
-                """, box, text)
+                    document.execCommand('selectAll',false,null);
+                    document.execCommand('delete',false,null);
+                """, box)
+                time.sleep(0.15)
+                box.send_keys(text)
+                # Trigger React
+                self.driver.execute_script("""
+                    arguments[0].dispatchEvent(new Event('input',{bubbles:true}));
+                    arguments[0].dispatchEvent(new Event('change',{bubbles:true}));
+                """, box)
                 time.sleep(0.5)
-                actual = self.driver.execute_script("return arguments[0].innerText;", box)
-                if actual and actual.strip():
-                    self.log(f"✅ Đã dán prompt (execCommand): {text[:60]}...")
+                actual = self.driver.execute_script(
+                    "return arguments[0].innerText || arguments[0].value;", box) or ""
+                if text[:20].lower() in actual.lower():
+                    self.log(f"Nhap OK (send_keys): {text[:50]}...")
+                    return True
+                self.log("send_keys khong ra ket qua, thu JS insertText...")
+            except Exception as e2:
+                self.log(f"send_keys loi: {e2}")
+
+            # ── PP3: JS execCommand insertText ────────────────────────────────
+            try:
+                self.driver.execute_script("""
+                    arguments[0].focus();
+                    document.execCommand('selectAll',false,null);
+                    document.execCommand('delete',false,null);
+                    document.execCommand('insertText',false,arguments[1]);
+                """, box, text)
+                time.sleep(0.4)
+                actual = self.driver.execute_script(
+                    "return arguments[0].innerText || arguments[0].value;", box) or ""
+                if actual.strip():
+                    self.log(f"Nhap OK (insertText): {text[:50]}...")
                     return True
             except Exception as e3:
-                self.log(f"⚠ execCommand: {e3}")
+                self.log(f"insertText loi: {e3}")
 
-            self.log("❌ Tất cả phương pháp đều thất bại")
+            self.log("THAT BAI: tat ca PP nhap prompt that bai")
             return False
+
         except Exception as e:
-            self.log(f"❌ set_prompt: {e}")
+            self.log(f"set_prompt loi: {e}")
             return False
 
     def click_generate(self):
