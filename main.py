@@ -1075,6 +1075,68 @@ class VeoApp:
             self.log_text.config(state=DISABLED)
         self.root.after(0, _do)
 
+    # ─── CONFIG: Lưu / tải trạng thái đăng nhập ───
+    def _load_config(self):
+        """Tải config từ file JSON (~/.veo3_config.json)."""
+        try:
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except:
+            pass
+        return {}
+
+    def _save_config(self, key, value):
+        """Lưu 1 key vào config file."""
+        try:
+            cfg = self._load_config()
+            cfg[key] = value
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.log(f"Khong luu config: {e}")
+
+    def _auto_connect_on_startup(self):
+        """Tự động kết nối Chrome nếu đã từng đăng nhập."""
+        cfg = self._load_config()
+        if not cfg.get("logged_in"):
+            return
+        self.log("Phat hien session cu - dang tu dong ket noi Chrome...")
+        self._update_login_indicator("connecting")
+        def _try():
+            if self.bc._is_port_open(9222):
+                ok = self.bc.connect_existing()
+                if ok:
+                    self.log("Tu dong ket noi Chrome thanh cong!")
+                    self._update_login_indicator("connected")
+                    self.set_status("  Tu dong da ket noi")
+                    return
+            ok = self.bc.open("normal", download_dir=OUTPUT_DIR_TEXT)
+            if ok:
+                self.log("Chrome mo thanh cong! San sang tao video.")
+                self._update_login_indicator("connected")
+                self.set_status("  Da ket noi - San sang")
+            else:
+                self.log("Khong tu ket noi duoc - vui long bam Mo Chrome thu cong.")
+                self._update_login_indicator("error")
+        import threading
+        threading.Thread(target=_try, daemon=True).start()
+
+    def _update_login_indicator(self, state):
+        """Cập nhật label trạng thái đăng nhập."""
+        configs = {
+            "none":       ("Chua dang nhap",                     MUTED),
+            "connecting": ("Dang ket noi...",                 ORANGE),
+            "connected":  ("Da ket noi - San sang tao video!", GREEN),
+            "error":      ("Ket noi that bai - Bam Mo Chrome",   RED),
+            "logged_in":  ("Da dang nhap (session da luu)",    GREEN),
+        }
+        text, color = configs.get(state, ("", MUTED))
+        try:
+            self.root.after(0, lambda: self.login_status_lbl.config(text=text, fg=color))
+        except:
+            pass
+
     def set_status(self, msg):
         self.root.after(0, lambda: self.status_var.set(msg))
 
