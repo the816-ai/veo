@@ -219,7 +219,8 @@ class BrowserController:
             # Selector đã xác nhận: button.jsIRVP hoặc text 'Dự án mới'
             try:
                 btn = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, "button.jsIRVP"))
+                     EC.element_to_be_clickable((By.XPATH,
+                         "//button[contains(.,'Du an moi') or contains(.,'New project') or contains(.,'D\u1ef1 \u00e1n m\u1edbi')]"))
                 )
                 btn.click()
                 time.sleep(2.5)
@@ -381,7 +382,27 @@ class BrowserController:
                     try:
                         import urllib.request
                         fname = os.path.join(out_dir, f"nano_banana_{int(time.time())}_{idx+1}.jpg")
-                        urllib.request.urlretrieve(src, fname)
+                        try:
+                            import base64 as _b64, urllib.request as _ur
+                            _drv = getattr(self.bc, 'driver', None)
+                            _b64_data = None
+                            if _drv:
+                                _b64_data = _drv.execute_script(
+                                    """
+                                    var xhr=new XMLHttpRequest();
+                                    xhr.open('GET',arguments[0],false);
+                                    xhr.responseType='arraybuffer'; xhr.send();
+                                    if(xhr.status!==200) return null;
+                                    var b=new Uint8Array(xhr.response),s='';
+                                    for(var i=0;i<b.length;i++) s+=String.fromCharCode(b[i]);
+                                    return btoa(s);
+                                    """, src)
+                            if _b64_data:
+                                with open(fname,'wb') as _fo: _fo.write(_b64.b64decode(_b64_data))
+                            else:
+                                _ur.urlretrieve(src, fname)
+                        except Exception as _fe:
+                            self.log(f'Loi tai anh: {_fe}')
                         log(f"💾 Đã lưu: {fname}")
                         saved += 1
                     except Exception as e:
@@ -1070,6 +1091,9 @@ class VeoApp:
         # characters: {name: {"path":str, "desc":str, "aliases":list}}
         self.characters = {}
         self.running = False
+        self._bq_running = False    # Batch image worker
+        self._mg_running = False    # Batch merge worker
+        self._mg_jobs    = []       # Merge queue
 
         self._setup_style()
         self._build_ui()
@@ -1348,6 +1372,9 @@ class VeoApp:
     # ── Vietsub helpers ─────────────────────────────────────
     def _vs_get_duration(self, video_path):
         """Lấy thời lượng video bằng ffprobe (giây)."""
+        import shutil as _shutil_ff
+        if not _shutil_ff.which("ffprobe"):
+            self.log("ffprobe chua cai - tai ffmpeg.org"); return 0
         def _run():
             try:
                 result = subprocess.run(
@@ -2527,7 +2554,7 @@ class VeoApp:
                 return
             sample = "A beautiful sunset over the ocean, cinematic lighting, 8K"
             self.log("🧪 TEST: Mở project mới + dán prompt mẫu...")
-            self.nb.select(5)
+            self._go_logs()
             def _run():
                 ok = self.bc.new_project()
                 if ok:
@@ -2690,7 +2717,7 @@ class VeoApp:
         out_dir = self.tv_out.get()
         os.makedirs(out_dir, exist_ok=True)
         self.log(f"🚀 Bắt đầu Text→Video [{mode}]: {len(parsed)} prompt(s)")
-        self.nb.select(5)  # switch to Logs tab
+        self._go_logs()  # switch to Logs tab
         self._run_bg(lambda: self._t2v_worker(parsed, out_dir))
 
     @staticmethod
@@ -2868,6 +2895,15 @@ class VeoApp:
             processed = sum(1 for p in lines if p[0])
             self.log(f"\n✅ Hoàn tất Text→Video! Video đã lưu tại:\n   {out_dir}")
 
+    def _go_logs(self):
+        """Switch to Logs tab safely (no hardcoded index)."""
+        try:
+            for idx in range(self.nb.index("end")):
+                tab_text = self.nb.tab(idx, "text")
+                if "Log" in tab_text or "log" in tab_text:
+                    self.nb.select(idx); return
+        except: pass
+
     def _stop(self):
         """Dừng worker đang chạy"""
         if self.running:
@@ -2902,7 +2938,7 @@ class VeoApp:
         out_dir = self.tv_out.get()
         os.makedirs(out_dir, exist_ok=True)
         self.log(f"⚡ PIPELINE MODE [{mode}]: Submit {len(parsed)} prompt(s) pipeline (submit + watcher)!")
-        self.nb.select(5)
+        self._go_logs()
         self._run_bg(lambda: self._rapid_worker(parsed, out_dir))
 
     def _pipeline_worker(self, lines, out_dir):
@@ -3429,7 +3465,7 @@ class VeoApp:
         out_dir = self.cv_out.get()
         os.makedirs(out_dir, exist_ok=True)
         self.log(f"🚀 Create Video: {len(prompts)} prompt(s), {len(self.characters)} nhân vật")
-        self.nb.select(5)
+        self._go_logs()
         self._run_bg(lambda: self._create_video_worker(prompts, out_dir))
 
     def _create_video_worker(self, prompts, out_dir):
@@ -3661,7 +3697,7 @@ class VeoApp:
         if not self._mg_jobs:
             messagebox.showerror("Lỗi", "Chưa có job nào! Bấm ➕ Thêm Job trước.")
             return
-        self.nb.select(5)  # Logs tab
+        self._go_logs()  # Logs tab
         import threading
         threading.Thread(target=self._mg_batch_worker,
                          args=(list(self._mg_jobs),), daemon=True).start()
