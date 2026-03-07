@@ -31,10 +31,18 @@ except ImportError:
 
 # ─── Gemini API (graceful) ───
 try:
-    import google.generativeai as genai
-    HAS_GEMINI = True
+    # Bug 12: ưu tiên package mới google.genai, fallback sang google.generativeai cũ
+    try:
+        import google.genai as genai
+        HAS_GEMINI = True
+        GEMINI_NEW_SDK = True
+    except ImportError:
+        import google.generativeai as genai
+        HAS_GEMINI = True
+        GEMINI_NEW_SDK = False
 except ImportError:
     HAS_GEMINI = False
+    GEMINI_NEW_SDK = False
 
 
 # ═══════════════════════════════════════════════════════
@@ -291,15 +299,26 @@ class BrowserController:
             log("📝 Nhập prompt...")
             try:
                 # Tìm textarea placeholder 'Bạn muốn tạo gì?'
-                ta = WebDriverWait(self.driver, 10).until(
-                    EC.presence_of_element_located((
-                        By.XPATH,
-                        "//textarea | //div[@contenteditable='true'] | //div[@aria-label]"
-                    ))
-                )
-                ta.click()
-                time.sleep(0.3)
-                ta.clear()
+                # Bug 4 fixed: ưu tiên textarea, rồi contenteditable, KHÔNG dùng div[@aria-label] quá rộng
+                ta = None
+                for _sel in ["textarea", "div[contenteditable='true'][role='textbox']",
+                             "div[contenteditable='true']"]:
+                    try:
+                        _el = WebDriverWait(self.driver, 8).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, _sel))
+                        )
+                        if _el and _el.is_displayed():
+                            ta = _el
+                            break
+                    except:
+                        continue
+                if not ta:
+                    raise Exception("Không tìm thấy ô nhập prompt cho ảnh")
+                self.driver.execute_script(
+                    "arguments[0].focus();"
+                    "document.execCommand('selectAll',false,null);"
+                    "document.execCommand('delete',false,null);", ta)
+                time.sleep(0.2)
                 ta.send_keys(prompt)
                 time.sleep(0.5)
                 log("✅ Đã nhập prompt")
@@ -491,11 +510,14 @@ class BrowserController:
         try:
             # Chờ 1.5s sau khi paste để React cập nhật state
             time.sleep(1.5)
-
-            # Tìm nút Tạo (button.bMhrec = arrow_forward button)
+            # Bug 2 fixed: aria-label selector bền hơn class (không bị Google update)
             btn_selectors = [
+                (By.XPATH, "//button[@aria-label='Generate' or @aria-label='Submit']"),
+                (By.XPATH, "//button[@aria-label='Tạo' or @aria-label='Gửi']"),
+                (By.XPATH, "//button[.//span[normalize-space()='arrow_forward'] or .//span[normalize-space()='send']]"),
+                (By.XPATH, "//button[.//mat-icon[contains(.,'arrow_forward')]]"),
+                # Fallback class (có thể đổi theo Google update)
                 (By.CSS_SELECTOR, "button.bMhrec"),
-                (By.XPATH, "//button[.//span[normalize-space()='arrow_forward']]"),
                 (By.XPATH, "//button[contains(@class,'bMhrec')]"),
             ]
             btn = None
@@ -572,7 +594,9 @@ class BrowserController:
             except Exception as e2:
                 self.log(f"⚠ JS coordinate click: {e2}")
 
-            return True  # Tiếp tục dù click có thể không thành công
+            # Bug 3 fixed: log cảnh báo thay vì im lặng return True
+            self.log("⚠ Tất cả phương pháp click generate đều thất bại!")
+            return False
         except Exception as e:
             self.log(f"❌ click_generate: {e}")
             return False
@@ -719,7 +743,8 @@ class BrowserController:
             self.log("⬇️ Đã click Tải xuống — chờ file...")
 
             # ── Bước 3: Chờ file .mp4 xuất hiện (tối đa 90s) ──
-            deadline = time.time() + 90
+            # Bug 10 fixed: 90s quá ngắn, tăng lên 180s cho mạng chậm
+            deadline = time.time() + 180
             new_file = None
             new_dir = save_dir
             while time.time() < deadline:
@@ -869,19 +894,22 @@ class BrowserController:
             file_input.send_keys(image_path)
             self.log(f"📤 Đang upload: {Path(image_path).name}")
 
-            # ── Bước 4: Chờ thumbnail xuất hiện trong panel (xác nhận upload OK) ──
-            self.log("⏳ Chờ xác nhận upload...")
+            # ── Bước 4: Chờ thumbnail mới xuất hiện (so sánh trước/sau) ──
+            # Bug 9 fixed: snapshot số lượng ảnh TRƯỚC khi upload để detect ảnh MỚI
+            try:
+                before_thumbs = len(self.driver.find_elements(By.XPATH,
+                    "//img[contains(@src,'blob:') or contains(@src,'googleusercontent') or contains(@src,'data:image')]"))
+            except:
+                before_thumbs = 0
+            self.log(f"⏳ Chờ xác nhận upload (trước: {before_thumbs} ảnh)...")
             deadline = time.time() + 25
             while time.time() < deadline:
                 time.sleep(2)
                 try:
-                    # Thumbnail ảnh vừa upload sẽ có src chứa blob hoặc googleusercontent
-                    thumbs = self.driver.find_elements(
-                        By.XPATH,
-                        "//img[contains(@src,'blob:') or contains(@src,'googleusercontent') or contains(@src,'data:image')]"
-                    )
-                    if thumbs:
-                        self.log(f"✅ Upload OK: {Path(image_path).name} ({len(thumbs)} ảnh trong panel)")
+                    thumbs = self.driver.find_elements(By.XPATH,
+                        "//img[contains(@src,'blob:') or contains(@src,'googleusercontent') or contains(@src,'data:image')]")
+                    if len(thumbs) > before_thumbs:
+                        self.log(f"✅ Upload OK: {Path(image_path).name} (+{len(thumbs)-before_thumbs} ảnh mới)")
                         return True
                 except: pass
 
@@ -1992,7 +2020,8 @@ class VeoApp:
         if not raw:
             return []
         # Tìm các dòng [Prompt X] ...
-        prompts = re.findall(r"\[Prompt \d+\]\s*(.+?)(?=\[Prompt|$)", raw, re.DOTALL)
+        # Bug 15 fixed: dùng \Z thay $ để match đúng cuối chuỗi trong DOTALL
+        prompts = re.findall(r"\[Prompt \d+\]\s*(.+?)(?=\[Prompt|\Z)", raw, re.DOTALL)
         if prompts:
             return [p.strip() for p in prompts if p.strip()]
         # Fallback: trả về toàn bộ
@@ -2407,6 +2436,15 @@ class VeoApp:
                   ).pack(side=LEFT, ipady=9, ipadx=8)
 
     def _start_text2video(self):
+        # Bug 6 fixed: guard chống 2 worker cùng chạy
+        # Bug 6 fixed: guard chống 2 worker cùng chạy
+        if self.running:
+            messagebox.showwarning("Đang chạy", "Đang có tiến trình! Nhấn STOP trước.")
+            return
+        if self.running:
+            from tkinter import messagebox
+            messagebox.showwarning("Đang chạy", "Đang có tiến trình chạy rồi! Nhấn STOP trước.")
+            return
         raw = self.tv_prompts.get("1.0", END).strip()
         if not raw:
             messagebox.showerror("Lỗi", "Chưa nhập prompt!")
@@ -2611,6 +2649,15 @@ class VeoApp:
 
     def _start_rapid(self):
         """⚡ Rapid Mode: Submit tất cả nhanh → render song song trên cloud"""
+        # Bug 6 fixed: guard chống 2 worker cùng chạy
+        if self.running:
+            messagebox.showwarning("Đang chạy", "Đang có tiến trình! Nhấn STOP trước.")
+            return
+        # Bug 6 fixed: guard chống 2 worker cùng chạy
+        if self.running:
+            from tkinter import messagebox
+            messagebox.showwarning("Đang chạy", "Đang có tiến trình chạy rồi! Nhấn STOP trước.")
+            return
         raw = self.tv_prompts.get("1.0", END).strip()
         if not raw:
             messagebox.showerror("Lỗi", "Chưa nhập prompt!")
@@ -2649,8 +2696,16 @@ class VeoApp:
                 self.root.after(0, lambda i=i, t=total: self.tv_status_lbl.config(
                     text=f"⚡ Submit {i}/{t} — render song song trên cloud..."))
 
-                ok = self.bc.new_project()
-                if not ok: continue
+                # Bug 11 fixed: chỉ tạo project MỚI cho prompt đầu tiên
+                # Các prompt tiếp theo tái dùng project (nhanh hơn nhiều)
+                if i == 1:
+                    ok = self.bc.new_project()
+                    if not ok: continue
+                    self.log("🆕 Đã tạo project mới cho RAPID mode")
+                else:
+                    ready = self.bc.wait_for_prompt_ready(timeout=20)
+                    if not ready:
+                        self.log(f"   ⚠ Prompt chưa sẵn sàng, thử submit vẫn")
 
                 if aspect_ratio and aspect_ratio != "16:9":
                     self.bc.set_aspect_ratio(aspect_ratio)
@@ -2684,7 +2739,10 @@ class VeoApp:
             self.root.after(0, self.tv_progress.stop)
             return
 
-        snap = set(os.listdir(out_dir))
+        # Bug 5 fixed: Chrome tải về ~/Downloads, phải monitor cả 2 folder
+        chrome_dl = str(Path.home() / "Downloads")
+        monitor_dirs = list({out_dir, chrome_dl})
+        snap = {d: set(os.listdir(d)) if os.path.exists(d) else set() for d in monitor_dirs}
         base = self.tv_base.get()
         video_counter = 1
         # Tính video_counter tiếp theo (tránh ghi đè file cũ)
@@ -2698,36 +2756,33 @@ class VeoApp:
         while time.time() < deadline and found < submitted and self.running:
             time.sleep(3)
             try:
-                current = set(os.listdir(out_dir))
-                added = current - snap
-                # Chỉ lấy file .mp4 mới (không phải .crdownload)
-                new_mp4s = sorted([f for f in added
-                                   if f.endswith(".mp4") and not f.endswith(".crdownload")])
-                for fname in new_mp4s:
-                    src = os.path.join(out_dir, fname)
-                    # Chờ file ổn định
-                    sz = os.path.getsize(src) if os.path.exists(src) else 0
-                    if prev_size_map.get(fname) == sz and sz > 0:
-                        # File ổn định → đổi tên theo thứ tự
-                        dst_name = f"{base}_{video_counter:02d}.mp4"
-                        dst = os.path.join(out_dir, dst_name)
-                        if not os.path.exists(dst):
-                            shutil.move(src, dst)
-                            sz_mb = os.path.getsize(dst) / 1024 / 1024
-                            self.log(f"✅ Tải về #{video_counter}: {dst_name} ({sz_mb:.1f} MB)")
-                            snap.add(dst_name)  # tránh detect lại
-                            video_counter += 1
-                            found += 1
-                            self.root.after(0, lambda f=found, s=submitted:
-                                self.tv_status_lbl.config(text=f"📥 Đã nhận {f}/{s} video"))
-                    else:
-                        prev_size_map[fname] = sz
+                # Bug 5 fixed: scan ca hai folder
+                for _mdir in monitor_dirs:
+                    if not os.path.exists(_mdir): continue
+                    current = set(os.listdir(_mdir))
+                    added = current - snap.get(_mdir, set())
+                    new_mp4s = sorted([f for f in added
+                                       if f.endswith('.mp4') and not f.endswith('.crdownload')])
+                    for fname in new_mp4s:
+                        _fp = os.path.join(_mdir, fname)
+                        sz = os.path.getsize(_fp) if os.path.exists(_fp) else 0
+                        if prev_size_map.get(fname) == sz and sz > 0:
+                            dst_name = f"{base}_{video_counter:02d}.mp4"
+                            dst = os.path.join(out_dir, dst_name)
+                            if not os.path.exists(dst):
+                                shutil.move(_fp, dst)
+                                sz_mb = os.path.getsize(dst) / 1024 / 1024
+                                self.log(f"Tai ve #{video_counter}: {dst_name} ({sz_mb:.1f} MB)")
+                                snap.setdefault(_mdir, set()).add(dst_name)
+                                video_counter += 1
+                                found += 1
+                                self.root.after(0, lambda f=found, s=submitted:
+                                    self.tv_status_lbl.config(text=f"Da nhan {f}/{s} video"))
+                        else:
+                            prev_size_map[fname] = sz
             except Exception as e:
-                self.log(f"⚠ Monitor: {e}")
+                self.log(f"Monitor: {e}")
 
-        self.running = False
-        self.root.after(0, self.tv_progress.stop)
-        self.root.after(0, lambda: self.tv_status_lbl.config(text=""))
         self.log(f"\n✅ RAPID xong! Nhận {found}/{submitted} video → {out_dir}")
 
     # ── TAB 4: Nhân Vật ─────────────────────────────────
