@@ -2619,6 +2619,35 @@ class VeoApp:
         self.tv_prompts.insert(END, "A cinematic sunset over the ocean, 8K, dramatic lighting\n"
                                     "A futuristic city at night, neon lights, rain, blade runner style")
 
+        # ── Live prompt counter ─────────────────────────────────
+        _ctr_bar = Frame(lf, bg=CARD)
+        _ctr_bar.pack(fill=X, padx=4, pady=(0,4))
+        self.tv_prompt_counter = Label(
+            _ctr_bar, text="0 prompt phat hien", bg=CARD, fg=ACCENT,
+            font=("Segoe UI", 9, "bold"))
+        self.tv_prompt_counter.pack(side=LEFT, padx=4)
+        Label(_ctr_bar,
+              text="| Normal: moi dong = 1 prompt  |  JSON: moi dong = 1 JSON object",
+              bg=CARD, fg=MUTED, font=("Segoe UI", 8)).pack(side=LEFT, padx=6)
+
+        def _tv_update_counter(event=None):
+            raw = self.tv_prompts.get("1.0", END).strip()
+            mode = self.tv_mode.get()
+            try:
+                parsed = VeoApp._parse_all_lines(raw, mode)
+                n = len(parsed)
+                label_text = str(n) + " prompt" + ("s" if n != 1 else "") + " phat hien"
+                self.tv_prompt_counter.config(
+                    text=label_text, fg=ACCENT if n > 0 else RED)
+            except Exception as _ce:
+                self.tv_prompt_counter.config(text="? Loi: " + str(_ce)[:40], fg=RED)
+
+        self.tv_prompts.bind("<KeyRelease>", _tv_update_counter)
+        self.tv_prompts.bind("<FocusOut>", _tv_update_counter)
+        self.tv_mode.trace_add("write", lambda *a: _tv_update_counter())
+        self.root.after(800, _tv_update_counter)
+
+
         # Settings
         sf = self._card(f, "⚙️ Cài đặt đầu ra")
         sf.pack(fill=X, padx=12, pady=4)
