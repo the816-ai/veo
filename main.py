@@ -1733,7 +1733,7 @@ class VeoApp:
         Label(bq_r2, text="Đợi giữa prompt (s):", bg=CARD, fg=MUTED, font=("Segoe UI",9)).pack(side=LEFT)
         self.bq_delay = Entry(bq_r2, width=5, font=("Segoe UI",9),
                               bg="#0D1117", fg=TEXT, relief="flat", justify=CENTER)
-        self.bq_delay.insert(0, "3"); self.bq_delay.pack(side=LEFT, padx=6, ipady=3)
+        self.bq_delay.insert(0, "10"); self.bq_delay.pack(side=LEFT, padx=6, ipady=3)
         Label(bq_r2, text="  Max chờ/ảnh (s):", bg=CARD, fg=MUTED, font=("Segoe UI",9)).pack(side=LEFT)
         self.bq_timeout = Entry(bq_r2, width=5, font=("Segoe UI",9),
                                 bg="#0D1117", fg=TEXT, relief="flat", justify=CENTER)
@@ -1975,7 +1975,15 @@ class VeoApp:
             # Ch\u1edd ng\u1eafn r\u1ed3i d\u00e1n prompt ti\u1ebfp
             if idx < total - 1 and self._bq_running:
                 self.log(f"   \u23f3 Ch\u1edd {delay:.0f}s r\u1ed3i d\u00e1n prompt ti\u1ebfp...")
-                time.sleep(delay)
+                # Chờ delay giây, từng giây 1 để có thể dừng nhanh
+                wait_s = int(delay)
+                for _w in range(wait_s):
+                    if not self._bq_running: break
+                    self.root.after(0, lambda r=wait_s-_w:
+                        self.bq_status.config(
+                            text=f"Cho {r}s roi dan prompt tiep..."
+                        ))
+                    time.sleep(1)
 
         # \u0110\u00e3 d\u00e1n h\u1ebft prompts. \u0110\u1ee3i watcher b\u1eaft \u1ea3nh cu\u1ed1i c\u00f9ng
         if self._bq_running:
