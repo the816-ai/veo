@@ -2044,7 +2044,7 @@ class VeoApp:
         """Tao anh Nano Banana 2 qua Google Flow."""
         import threading
         from pathlib import Path
-        if not self.browser.driver:
+        if not self.bc.driver:
             from tkinter import messagebox
             messagebox.showerror("Loi", "Trinh duyet chua ket noi!\nVao tab Ket Noi -> Mo Chrome.")
             return
@@ -2060,7 +2060,7 @@ class VeoApp:
         self.log(f"Tao anh x{count} ({orient}): {prompt[:60]}")
         def _run():
             try:
-                self.browser.generate_image_flow(
+                self.bc.generate_image_flow(
                     prompt=prompt, count=count,
                     orientation=orient, out_dir=out_dir, log_fn=self.log)
                 self.root.after(0, lambda: self.gm_img_status.config(
@@ -2161,7 +2161,9 @@ class VeoApp:
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         # Bind mousewheel khi chuột ở trong canvas hoặc inner
         canvas.bind("<MouseWheel>", _on_mousewheel)
-        inner.bind_all("<MouseWheel>", _on_mousewheel)
+        # bind_all causes scroll conflict - bind only to canvas and inner
+        outer.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        outer.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
         return outer, inner
 
@@ -2442,7 +2444,7 @@ class VeoApp:
                     # Nếu có key scene_* hoặc key bất kỳ chứa dict với 'prompt'
                     scene_keys = sorted(
                         [k for k, v in obj.items() if isinstance(v, dict)],
-                        key=lambda k: k  # sắp xếp theo tên key
+                        key=lambda k: [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', k)]  # natural sort
                     )
                     if scene_keys:
                         for k in scene_keys:
@@ -2596,7 +2598,8 @@ class VeoApp:
             self.running = False
             self.root.after(0, self.tv_progress.stop)
             self.root.after(0, lambda: self.tv_status_lbl.config(text=""))
-            self.log(f"\n✅ Hoàn tất Text→Video [{len(lines)} prompt]! Video đã lưu tại:\n   {out_dir}")
+            processed = sum(1 for p in lines if p[0])
+            self.log(f"\n✅ Hoàn tất Text→Video! Video đã lưu tại:\n   {out_dir}")
 
     def _stop(self):
         """Dừng worker đang chạy"""
