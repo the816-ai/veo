@@ -2030,6 +2030,51 @@ class VeoApp:
             messagebox.showerror("Lß╗ùi", f"Kh├┤ng gß╗¡i ─æ╞░ß╗úc: {e}")
 
     # ΓöÇΓöÇ HELPERS ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    def _gm_use_result_for_img(self):
+        """Copy ket qua Gemini vao o prompt tao anh."""
+        prompts = self._gm_extract_prompts()
+        if not prompts:
+            from tkinter import messagebox
+            messagebox.showinfo("Thong bao", "Chua co ket qua Gemini!")
+            return
+        self.gm_img_prompt.delete("1.0", "end")
+        self.gm_img_prompt.insert("end", prompts[0].strip())
+        self.gm_status.config(text="Da copy prompt Gemini sang o tao anh")
+
+    def _gm_generate_image(self):
+        """Tao anh Nano Banana 2 qua Google Flow."""
+        import threading
+        from pathlib import Path
+        if not self.browser.driver:
+            from tkinter import messagebox
+            messagebox.showerror("Loi", "Trinh duyet chua ket noi!\nVao tab Ket Noi -> Mo Chrome.")
+            return
+        prompt = self.gm_img_prompt.get("1.0", "end").strip()
+        if not prompt:
+            from tkinter import messagebox
+            messagebox.showerror("Loi", "Chua nhap prompt tao anh!")
+            return
+        count = int(self.gm_img_count.get())
+        orient = self.gm_img_orient.get()
+        out_dir = str(Path.home() / "Downloads" / "VEO3_OUTPUT" / "images")
+        self.gm_img_status.config(text="Dang tao anh...", fg="#E67E22")
+        self.log(f"Tao anh x{count} ({orient}): {prompt[:60]}")
+        def _run():
+            try:
+                self.browser.generate_image_flow(
+                    prompt=prompt, count=count,
+                    orientation=orient, out_dir=out_dir, log_fn=self.log)
+                self.root.after(0, lambda: self.gm_img_status.config(
+                    text=f"Xong! Anh luu tai: {out_dir}", fg="#2ECC71"))
+                self.log(f"Tao anh xong -> {out_dir}")
+            except Exception as e:
+                _err = str(e)
+                self.root.after(0, lambda: self.gm_img_status.config(
+                    text=f"Loi: {_err}", fg="#E74C3C"))
+                self.log(f"Loi: {_err}")
+        threading.Thread(target=_run, daemon=True).start()
+
+
     def _build_ui(self):
         # ΓöÇΓöÇ Header banner ΓöÇΓöÇ
         hdr = Frame(self.root, bg="#0A0F1A", height=56)
