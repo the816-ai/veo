@@ -1689,79 +1689,30 @@ class VeoApp:
                                font=("Segoe UI",9), bg=BG, fg=MUTED)
         self.gm_status.pack(pady=(0,8))
 
-        # ── Tạo ảnh trực tiếp qua Flow (Nano Banana 2) ──
-        img_card = self._card(f, "🎨 Tạo ảnh bằng Nano Banana 2 (Google Flow — miễn phí!)")
-        img_card.pack(fill=X, padx=12, pady=(4,10))
+        # ── TẠO ẢNH NANO BANANA 2 — BATCH PIPELINE ──────────────────────────
+        img_card = self._card(f, "🎨 Tạo ảnh Nano Banana 2 (Google Flow — miễn phí!)")
+        img_card.pack(fill=X, padx=12, pady=(4, 10))
 
         Label(img_card,
-              text="💡 Prompt dưới đây (hoặc tự nhập) — dùng kết quả từ Gemini bằng nút 'Dùng prompt'",
-              bg=CARD, fg=MUTED, font=("Segoe UI",8)).pack(anchor=W, padx=8, pady=(4,2))
-
-        self.gm_img_prompt = scrolledtext.ScrolledText(
-            img_card, height=4, font=("Segoe UI",9), wrap=WORD,
-            bg="#0D1117", fg=TEXT, insertbackground=TEXT, relief="flat")
-        self.gm_img_prompt.pack(fill=X, padx=6, pady=(0,4))
-        self.gm_img_prompt.insert(END, "A beautiful woman walking in a park, golden hour, cinematic")
-
-        ir1 = Frame(img_card, bg=CARD); ir1.pack(fill=X, padx=8, pady=3)
-        # Số lượng ảnh
-        Label(ir1, text="Số ảnh:", bg=CARD, fg=MUTED, font=("Segoe UI",9)).pack(side=LEFT)
-        self.gm_img_count = StringVar(value="1")
-        for n in ["1","2","3","4"]:
-            Radiobutton(ir1, text=f"x{n}", variable=self.gm_img_count, value=n,
-                        bg=CARD, fg=TEXT, selectcolor=BG,
-                        activebackground=CARD, font=("Segoe UI",9)
-                        ).pack(side=LEFT, padx=6)
-        # Tỉ lệ khung
-        Label(ir1, text="  Hướng:", bg=CARD, fg=MUTED, font=("Segoe UI",9)).pack(side=LEFT, padx=(12,0))
-        self.gm_img_orient = StringVar(value="ngang")
-        Radiobutton(ir1, text="▬ Ngang", variable=self.gm_img_orient, value="ngang",
-                    bg=CARD, fg=TEXT, selectcolor=BG, font=("Segoe UI",9),
-                    activebackground=CARD).pack(side=LEFT, padx=4)
-        Radiobutton(ir1, text="▮ Dọc", variable=self.gm_img_orient, value="doc",
-                    bg=CARD, fg=TEXT, selectcolor=BG, font=("Segoe UI",9),
-                    activebackground=CARD).pack(side=LEFT, padx=4)
-
-        ir2 = Frame(img_card, bg=CARD); ir2.pack(fill=X, padx=8, pady=(2,6))
-        self._btn(ir2, "⬅ Dùng Prompt Gemini",
-                  lambda: self._gm_use_result_for_img(),
-                  color="#21262D").pack(side=LEFT, ipady=5, ipadx=6)
-        self._btn(ir2, "  🎨  Tạo ảnh Nano Banana 2  ",
-                  self._gm_generate_image,
-                  color="#C0392B").pack(side=LEFT, padx=6, ipady=5, fill=X, expand=True)
-
-        self.gm_img_status = Label(
-            img_card, text="💡 Nhấn nút 'Tạo ảnh' — trình duyệt phải đang mở và kết nối",
-            font=("Segoe UI",8), bg=CARD, fg=MUTED, wraplength=700, justify=LEFT)
-        self.gm_img_status.pack(anchor=W, padx=8, pady=(0,4))
-
-        # ── BATCH IMAGE QUEUE (JSON) ──
-        bq = self._card(f, "📋 Batch Tạo ảnh Hàng Loạt — JSON / mỗi dòng 1 prompt")
-        bq.pack(fill=X, padx=12, pady=(0,10))
-
-        Label(bq,
               text=(
-                "💡 Dán prompt JSON: [\"prompt1\",\"prompt2\"] hoặc mỗi dòng 1 prompt.\n"
-                "   Tool sẽ tự split, dán từng prompt vào Flow, đợi ảnh xong rồi tải về theo thứ tự."
+                "💡 Nhập từng prompt (mỗi dòng 1 prompt) hoặc JSON array.\n"
+                "   Tool tự mở Flow, chọn đúng hướng/số ảnh, submit từng prompt và tải về tự động."
               ),
               bg=CARD, fg=MUTED, font=("Segoe UI", 8),
               justify=LEFT).pack(anchor=W, padx=8, pady=(4, 2))
 
         self.bq_text = scrolledtext.ScrolledText(
-            bq, height=7, font=("Consolas", 9), wrap=WORD,
+            img_card, height=7, font=("Consolas", 9), wrap=WORD,
             bg="#0D1117", fg="#F9E64F", insertbackground=TEXT, relief="flat")
         self.bq_text.pack(fill=X, padx=6, pady=(0, 4))
         self.bq_text.insert(END,
-            '\n'.join([
-                '[',
-                '  "A samurai warrior in cherry blossom rain, cinematic, 4K",',
-                '  "Futuristic neon city at night, cyberpunk style, rain reflections",',
-                '  "Baby panda eating bamboo in a misty forest, cute, soft light"',
-                ']'
-            ])
+            "A samurai warrior in cherry blossom rain, cinematic, 4K\n"
+            "Futuristic neon city at night, cyberpunk style, rain reflections\n"
+            "Baby panda eating bamboo in a misty forest, cute, soft light"
         )
 
-        bq_r1 = Frame(bq, bg=CARD); bq_r1.pack(fill=X, padx=8, pady=3)
+        # Cài đặt: số ảnh + hướng
+        bq_r1 = Frame(img_card, bg=CARD); bq_r1.pack(fill=X, padx=8, pady=3)
         Label(bq_r1, text="Số ảnh/prompt:", bg=CARD, fg=MUTED, font=("Segoe UI",9)).pack(side=LEFT)
         self.bq_count = StringVar(value="1")
         for n in ["1","2","3","4"]:
@@ -1777,8 +1728,9 @@ class VeoApp:
                     bg=CARD, fg=TEXT, selectcolor=BG, font=("Segoe UI",9),
                     activebackground=CARD).pack(side=LEFT, padx=4)
 
-        bq_r2 = Frame(bq, bg=CARD); bq_r2.pack(fill=X, padx=8, pady=2)
-        Label(bq_r2, text="Đợi giữa nhóm (s):", bg=CARD, fg=MUTED, font=("Segoe UI",9)).pack(side=LEFT)
+        # Thời gian chờ
+        bq_r2 = Frame(img_card, bg=CARD); bq_r2.pack(fill=X, padx=8, pady=2)
+        Label(bq_r2, text="Đợi giữa prompt (s):", bg=CARD, fg=MUTED, font=("Segoe UI",9)).pack(side=LEFT)
         self.bq_delay = Entry(bq_r2, width=5, font=("Segoe UI",9),
                               bg="#0D1117", fg=TEXT, relief="flat", justify=CENTER)
         self.bq_delay.insert(0, "3"); self.bq_delay.pack(side=LEFT, padx=6, ipady=3)
@@ -1787,22 +1739,29 @@ class VeoApp:
                                 bg="#0D1117", fg=TEXT, relief="flat", justify=CENTER)
         self.bq_timeout.insert(0, "90"); self.bq_timeout.pack(side=LEFT, padx=6, ipady=3)
 
-        bq_r3 = Frame(bq, bg=CARD); bq_r3.pack(fill=X, padx=8, pady=(2,4))
+        # Nút Dùng Prompt Gemini (đổ kết quả Gemini vào textbox)
+        bq_r3 = Frame(img_card, bg=CARD); bq_r3.pack(fill=X, padx=8, pady=(2,4))
+        self._btn(bq_r3, "⬅ Dùng Prompt Gemini",
+                  self._gm_use_result_for_img,
+                  color="#21262D").pack(side=LEFT, ipady=5, ipadx=6)
         self.bq_start_btn = self._btn(
-            bq_r3, "  ▶️  Bắt đầu Batch Tạo ảnh  ",
+            bq_r3, "  ▶  Bắt đầu Tạo ảnh  ",
             self._img_batch_start, color="#1A7F37")
-        self.bq_start_btn.pack(side=LEFT, fill=X, expand=True, ipady=8)
+        self.bq_start_btn.pack(side=LEFT, padx=6, fill=X, expand=True, ipady=6)
         self.bq_stop_btn = self._btn(
             bq_r3, "⏹ Dừng", self._img_batch_stop, color="#6E2424")
-        self.bq_stop_btn.pack(side=LEFT, padx=(4,0), ipady=8, ipadx=10)
+        self.bq_stop_btn.pack(side=LEFT, ipady=6, ipadx=10)
 
-        self.bq_progress = ttk.Progressbar(bq, mode="determinate", maximum=100)
+        self.bq_progress = ttk.Progressbar(img_card, mode="determinate", maximum=100)
         self.bq_progress.pack(fill=X, padx=8, pady=(4,2))
         self.bq_status = Label(
-            bq, text="📋 Sẵn sàng. Nhấn 'Bắt đầu' để chạy batch.",
+            img_card, text="Sandby — nhap prompt va nhan 'Bat dau Tao anh'",
             font=("Segoe UI",8), bg=CARD, fg=MUTED, wraplength=700, justify=LEFT)
         self.bq_status.pack(anchor=W, padx=8, pady=(0,6))
         self._bq_running = False
+        # gm_img_prompt giả lập để _gm_use_result_for_img không lỗi
+        self.gm_img_prompt = self.bq_text
+
 
         # Ẩn vision card ban đầu
         self._gm_update_ui()
@@ -1820,7 +1779,7 @@ class VeoApp:
     # \u2500\u2500 BATCH IMAGE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     def _img_batch_start(self):
         """Parse JSON/lines v\u00e0 ch\u1ea1y batch t\u1ea1o \u1ea3nh."""
-        if not self.browser.driver:
+        if not self.bc.driver:
             messagebox.showerror("L\u1ed7i",
                 "Tr\u00ecnh duy\u1ec7t ch\u01b0a k\u1ebft n\u1ed1i!\nV\u00e0o tab 'K\u1ebft N\u1ed1i' \u2192 M\u1edf Chrome.")
             return
@@ -1890,7 +1849,7 @@ class VeoApp:
             import urllib.request as _ur
             while watcher_alive[0]:
                 time.sleep(2)
-                drv2 = self.browser.driver
+                drv2 = self.bc.driver
                 if not drv2:
                     continue
                 try:
@@ -1924,7 +1883,7 @@ class VeoApp:
         watcher_thread.start()
 
         # \u2500\u2500 MAIN LOOP: D\u00e1n prompt li\u00ean t\u1ee5c \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-        drv = self.browser.driver
+        drv = self.bc.driver
         if not drv:
             self.log("\u274c Kh\u00f4ng c\u00f3 browser!")
             watcher_alive[0] = False
