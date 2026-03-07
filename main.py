@@ -1,0 +1,1760 @@
+"""
+Veo 3 Flow Automation Tool
+Tự động hóa Google Flow để tạo video Veo 3
+"""
+import os, sys, time, json, threading, subprocess, shutil, re
+from pathlib import Path
+from tkinter import *
+from tkinter import ttk, filedialog, messagebox, scrolledtext
+
+FLOW_URL = "https://labs.google/fx/vi/tools/flow"
+CHROME_PROFILE = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Google", "Chrome", "User Data")
+OUTPUT_DIR_TEXT = str(Path.home() / "Downloads" / "VEO3_OUTPUT" / "text_to_video")
+OUTPUT_DIR_CHAR = str(Path.home() / "Downloads" / "VEO3_OUTPUT" / "character_video")
+CHROMEDRIVER_PATH = None  # auto-detect via webdriver_manager
+
+# ─── Selenium imports (graceful) ───
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.common.action_chains import ActionChains
+    from selenium.webdriver.common.keys import Keys
+    from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
+    from webdriver_manager.chrome import ChromeDriverManager
+    HAS_SELENIUM = True
+except ImportError:
+    HAS_SELENIUM = False
+
+
+# ═══════════════════════════════════════════════════════
+# BROWSER CONTROLLER
+# ═══════════════════════════════════════════════════════
+class BrowserController:
+    def __init__(self, log_fn=None):
+        self.driver = None
+        self.log = log_fn or print
+        self.wait = None
+        self._download_dir = OUTPUT_DIR_TEXT  # Bug fix: init before connect_existing
+
+    def _opts(self, incognito=False, fresh=False, download_dir=None):
+        opts = Options()
+        opts.add_argument("--remote-debugging-port=9222")
+        if fresh:
+            opts.add_argument("--no-first-run")
+            opts.add_argument("--no-default-browser-check")
+        elif incognito:
+            opts.add_argument("--incognito")
+        else:
+            opts.add_argument(f"--user-data-dir={CHROME_PROFILE}")
+            opts.add_argument("--profile-directory=Default")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+        opts.add_experimental_option("useAutomationExtension", False)
+        # Set thư mục tải xuống tự động
+        dl_dir = download_dir or OUTPUT_DIR_TEXT
+        os.makedirs(dl_dir, exist_ok=True)
+        prefs = {
+            "download.default_directory": dl_dir,
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": True,
+        }
+        opts.add_experimental_option("prefs", prefs)
+        self._download_dir = dl_dir
+        return opts
+
+    def connect_existing(self):
+        """Kết nối tới Chrome đang mở qua remote debug port 9222"""
+        if not HAS_SELENIUM:
+            return False
+        try:
+            self.log("🔗 Đang kết nối Chrome đang mở (port 9222)...")
+            opts = Options()
+            opts.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
+            svc = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=svc, options=opts)
+            self.wait = WebDriverWait(self.driver, 30)
+            url = self.driver.current_url
+            self.log(f"✅ Kết nối thành công! Đang ở: {url[:60]}")
+            return True
+        except Exception as e:
+            self.log(f"❌ Kết nối thất bại: {e}")
+            self.log("💡 Hãy mở Chrome bằng nút 'MỞ CHROME' trong tool thay vì mở thủ công!")
+            return False
+
+    def open(self, mode="normal", download_dir=None):
+        """mode: normal | incognito | fresh"""
+        if not HAS_SELENIUM:
+            # messagebox PHẢI gọi từ main thread
+            import tkinter.messagebox as _mb
+            try: _mb.showerror("Lỗi", "Chưa cài selenium!\nChạy: pip install selenium webdriver-manager")
+            except: pass
+            return False
+        try:
+            self.log("🌐 Đang mở Chrome...")
+            opts = self._opts(
+                incognito=(mode == "incognito"),
+                fresh=(mode == "fresh"),
+                download_dir=download_dir
+            )
+            svc = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=svc, options=opts)
+            self.driver.maximize_window()
+            self.wait = WebDriverWait(self.driver, 30)
+            self.driver.get(FLOW_URL)
+            self.driver.execute_script("document.body.style.zoom='100%'")
+            self.log(f"✅ Chrome mở | Tải về: {self._download_dir}")
+            return True
+        except Exception as e:
+            self.log(f"❌ Lỗi mở Chrome: {e}")
+            return False
+
+    def is_alive(self):
+        try:
+            _ = self.driver.title
+            return True
+        except:
+            return False
+
+    def get_status(self):
+        if not self.driver:
+            return "Chưa mở"
+        try:
+            url = self.driver.current_url
+            if "flow" in url:
+                return f"✅ Đã mở Flow"
+            return f"Đang ở: {url[:50]}"
+        except:
+            return "❌ Mất kết nối"
+
+    def new_project(self):
+        """Tạo dự án mới trên Flow"""
+        try:
+            self.driver.get(FLOW_URL)
+            time.sleep(3)
+            # Selector đã xác nhận: button.jsIRVP hoặc text 'Dự án mới'
+            try:
+                btn = WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, "button.jsIRVP"))
+                )
+                btn.click()
+                time.sleep(2.5)
+                self.log("✅ Đã tạo dự án mới")
+            except TimeoutException:
+                # Fallback: tìm theo text
+                try:
+                    btn = self.driver.find_element(
+                        By.XPATH, "//button[contains(.,'Dự án mới') or contains(.,'New project')]"
+                    )
+                    btn.click()
+                    time.sleep(2.5)
+                    self.log("✅ Đã tạo dự án mới (fallback)")
+                except:
+                    self.log("ℹ️ Không thấy nút Dự án mới — tiếp tục")
+            return True
+        except Exception as e:
+            self.log(f"❌ Lỗi tạo dự án: {e}")
+            return False
+
+    def set_prompt(self, text):
+        """Nhập prompt vào Flow — clipboard paste (trigger real React paste event)"""
+        import subprocess, tempfile
+
+        def _copy_to_clipboard(t):
+            """Copy text vào Windows clipboard qua PowerShell"""
+            tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt',
+                                               delete=False, encoding='utf-8')
+            tmp.write(t); tmp.close()
+            subprocess.run(
+                ["powershell", "-Command",
+                 f"Get-Content '{tmp.name}' -Raw | Set-Clipboard"],
+                capture_output=True, timeout=5
+            )
+            try: os.unlink(tmp.name)
+            except: pass
+
+        try:
+            # Chờ ô prompt thực sự clickable
+            box = None
+            for sel in ["div.fyuIsy[role='textbox']", "div[role='textbox']",
+                        "div[contenteditable='true']"]:
+                try:
+                    box = WebDriverWait(self.driver, 15).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
+                    )
+                    if box and box.is_displayed():
+                        break
+                    box = None
+                except:
+                    continue
+
+            if not box:
+                self.log("❌ Không tìm thấy ô prompt (15s timeout)")
+                return False
+
+            # Scroll và focus
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", box)
+            time.sleep(0.4)
+
+            # ── Phương pháp 1: Clipboard Ctrl+V (React nhận real paste event) ──
+            try:
+                _copy_to_clipboard(text)
+                box.click()
+                time.sleep(0.3)
+                # Xóa nội dung cũ
+                box.send_keys(Keys.CONTROL + "a")
+                time.sleep(0.1)
+                box.send_keys(Keys.DELETE)
+                time.sleep(0.2)
+                # Paste từ clipboard → React nhận real paste event
+                box.send_keys(Keys.CONTROL + "v")
+                time.sleep(0.6)
+                actual = self.driver.execute_script("return arguments[0].innerText;", box)
+                if actual and actual.strip():
+                    self.log(f"✅ Đã dán prompt (Ctrl+V): {text[:60]}...")
+                    return True
+                self.log("⚠ Clipboard paste: text không xuất hiện, thử fallback...")
+            except Exception as e1:
+                self.log(f"⚠ Clipboard: {e1}")
+
+            # ── Phương pháp 2: execCommand(insertText) — React-safe ──
+            try:
+                box.click(); time.sleep(0.2)
+                self.driver.execute_script("""
+                    arguments[0].focus();
+                    document.execCommand('selectAll', false, null);
+                    document.execCommand('delete', false, null);
+                    document.execCommand('insertText', false, arguments[1]);
+                """, box, text)
+                time.sleep(0.5)
+                actual = self.driver.execute_script("return arguments[0].innerText;", box)
+                if actual and actual.strip():
+                    self.log(f"✅ Đã dán prompt (execCommand): {text[:60]}...")
+                    return True
+            except Exception as e2:
+                self.log(f"⚠ execCommand: {e2}")
+
+            # ── Phương pháp 3: send_keys từng ký tự ──
+            try:
+                box.click(); time.sleep(0.3)
+                box.send_keys(Keys.CONTROL + "a")
+                box.send_keys(Keys.DELETE)
+                time.sleep(0.2)
+                for chunk in [text[i:i+60] for i in range(0, len(text), 60)]:
+                    box.send_keys(chunk)
+                    time.sleep(0.08)
+                self.log(f"✅ Đã nhập prompt (send_keys): {text[:60]}...")
+                return True
+            except Exception as e3:
+                self.log(f"❌ send_keys: {e3}")
+
+            return False
+        except Exception as e:
+            self.log(f"❌ set_prompt: {e}")
+            return False
+
+    def click_generate(self):
+        """Click nút Tạo — chờ enabled + ActionChains + Enter fallback"""
+        try:
+            # Chờ 1.5s sau khi paste để React cập nhật state
+            time.sleep(1.5)
+
+            # Tìm nút Tạo (button.bMhrec = arrow_forward button)
+            btn_selectors = [
+                (By.CSS_SELECTOR, "button.bMhrec"),
+                (By.XPATH, "//button[.//span[normalize-space()='arrow_forward']]"),
+                (By.XPATH, "//button[contains(@class,'bMhrec')]"),
+            ]
+            btn = None
+            for by, sel in btn_selectors:
+                try:
+                    el = self.driver.find_element(by, sel)
+                    if el and el.is_displayed():
+                        btn = el
+                        break
+                except:
+                    continue
+
+            if btn:
+                # Kiểm tra button có bị disabled không
+                disabled = btn.get_attribute("disabled") or btn.get_attribute("aria-disabled")
+                if disabled and str(disabled).lower() in ("true", "disabled"):
+                    self.log("⚠ Nút Tạo đang disabled — thử Enter key...")
+                else:
+                    # Scroll vào view + ActionChains click (giống chuột thật)
+                    self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                    time.sleep(0.3)
+                    ActionChains(self.driver).move_to_element(btn).click().perform()
+                    self.log("✅ Đã click nút Tạo (ActionChains)")
+                    time.sleep(0.5)
+
+                    # Xác nhận click có hiệu lực bằng cách kiểm tra URL thay đổi
+                    url_before = self.driver.current_url
+                    time.sleep(2)
+                    url_after = self.driver.current_url
+                    if url_after != url_before or "/edit/" in url_after:
+                        self.log("✅ Xác nhận: trang đổi URL — generate đang chạy!")
+                        return True
+                    self.log("⚠ URL không đổi — thử Enter fallback...")
+
+            # Fallback: Enter trong ô prompt (cách đáng tin nhất với React)
+            try:
+                box = self.driver.find_element(By.CSS_SELECTOR, "div[role='textbox']")
+                box.click()
+                time.sleep(0.3)
+                box.send_keys(Keys.RETURN)
+                self.log("⌨️ Sent Enter key → generate")
+                return True
+            except Exception as ef:
+                self.log(f"⚠ Enter fallback: {ef}")
+
+            # Fallback 2: JS tìm button phía phải ô prompt (tránh lỗi tọa độ)
+            try:
+                box = self.driver.find_element(By.CSS_SELECTOR, "div[role='textbox']")
+                clicked = self.driver.execute_script("""
+                    var box = arguments[0];
+                    var rect = box.getBoundingClientRect();
+                    var x = rect.right + 60, y = rect.top + rect.height / 2;
+                    var els = document.elementsFromPoint(x, y);
+                    for (var i = 0; i < els.length; i++) {
+                        if (els[i].tagName === 'BUTTON') {
+                            els[i].click();
+                            return els[i].className || 'button';
+                        }
+                    }
+                    return null;
+                """, box)
+                if clicked:
+                    self.log(f"🖱 JS click button phải input: {clicked[:30]}")
+                    return True
+            except Exception as e2:
+                self.log(f"⚠ JS coordinate click: {e2}")
+
+            return True  # Tiếp tục dù click có thể không thành công
+        except Exception as e:
+            self.log(f"❌ click_generate: {e}")
+            return False
+
+
+    def wait_for_video(self, timeout=300):
+        """Chờ video tạo xong — chỉ check SUCCESS, không check error giả"""
+        self.log(f"⏳ Chờ video hoàn thành (tối đa {timeout}s)...")
+        start = time.time()
+        check_interval = 10  # kiểm tra mỗi 10s
+        last_log = 0
+
+        while time.time() - start < timeout:
+            time.sleep(check_interval)
+            elapsed = int(time.time() - start)
+
+            try:
+                # 1. Tìm nút "Tải xuống" — chỉ xuất hiện khi video xong
+                dl_btns = self.driver.find_elements(
+                    By.XPATH,
+                    "//button[normalize-space(.)='Tải xuống' or @aria-label='Tải xuống' or @aria-label='Download']"
+                )
+                if dl_btns:
+                    self.log(f"✅ Video hoàn thành sau {elapsed}s! Tìm thấy nút Tải xuống.")
+                    return True
+
+                # 2. URL đổi sang /edit/ — project đã tạo xong 1 clip
+                url = self.driver.current_url
+                if "/edit/" in url:
+                    # Tìm video element có src
+                    vids = self.driver.find_elements(By.TAG_NAME, "video")
+                    for v in vids:
+                        src = v.get_attribute("src") or ""
+                        if src and ("blob:" in src or "storage.googleapis" in src):
+                            self.log(f"✅ Video ready sau {elapsed}s!")
+                            return True
+
+                # Log tiến trình mỗi 30s
+                if elapsed - last_log >= 30:
+                    self.log(f"   ⏳ {elapsed}s — đang render...")
+                    last_log = elapsed
+
+            except Exception as e:
+                pass  # Chrome bận, thử lại sau
+
+        self.log(f"⏱ Timeout sau {timeout}s — tiếp prompt tiếp")
+        return False
+
+
+    def set_aspect_ratio(self, ratio):
+        """Chọn tỷ lệ khung hình trên Flow: 16:9 | 9:16 | 1:1"""
+        try:
+            # Map ratio → tab text
+            ratio_map = {
+                "16:9": ["Ngang", "16:9", "Landscape"],
+                "9:16": ["Dọc", "9:16", "Portrait"],
+                "1:1": ["Vuông", "1:1", "Square"],
+            }
+            labels = ratio_map.get(ratio, [])
+            if not labels:
+                return False
+
+            for label in labels:
+                try:
+                    btn = self.driver.find_element(
+                        By.XPATH,
+                        f"//button[@role='tab' and (contains(.,'{label}') or @aria-label='{label}')]"
+                    )
+                    if btn:
+                        btn.click()
+                        time.sleep(0.5)
+                        self.log(f"✅ Tỷ lệ: {ratio}")
+                        return True
+                except:
+                    continue
+            return False
+        except Exception as e:
+            self.log(f"⚠ Set aspect ratio: {e}")
+            return False
+
+    def click_download(self, save_dir, filename):
+        """Click Tải xuống → chờ file tải XONG hoàn toàn → đổi tên theo thứ tự"""
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+
+            # ── Bước 1: Set CDP download dir ──
+            try:
+                self.driver.execute_cdp_cmd(
+                    "Browser.setDownloadBehavior",
+                    {"behavior": "allow", "downloadPath": save_dir}
+                )
+            except: pass
+
+            # Monitor cả save_dir và ~/Downloads
+            chrome_dl = str(Path.home() / "Downloads")
+            watch_dirs = list({save_dir, chrome_dl})
+
+            # Snapshot SAU khi set CDP, TRƯỚC khi click
+            snap = {d: set(os.listdir(d)) if os.path.exists(d) else set()
+                    for d in watch_dirs}
+
+            # ── Bước 2: Tìm và click nút Tải xuống ──
+            dl_btn = None
+            for sel in [
+                "//button[normalize-space(.)='Tải xuống']",
+                "//button[@aria-label='Tải xuống' or @aria-label='Download']",
+                "//button[contains(.,'Tải xuống')]",
+                "//button[contains(.,'Download')]",
+                "//a[contains(@href,'.mp4')]",
+            ]:
+                try:
+                    el = self.driver.find_element(By.XPATH, sel)
+                    if el and el.is_displayed():
+                        dl_btn = el
+                        break
+                except: continue
+
+            if not dl_btn:
+                self.log("⚠️ Không tìm thấy nút Tải xuống")
+                return False
+
+            ActionChains(self.driver).move_to_element(dl_btn).click().perform()
+            self.log("⬇️ Đã click Tải xuống — chờ file...")
+
+            # ── Bước 3: Chờ file .mp4 xuất hiện (tối đa 90s) ──
+            deadline = time.time() + 90
+            new_file = None
+            new_dir = save_dir
+            while time.time() < deadline:
+                time.sleep(1.5)
+                for d in watch_dirs:
+                    if not os.path.exists(d): continue
+                    current = set(os.listdir(d))
+                    added = current - snap[d]
+                    # File tải xong = .mp4, không phải .crdownload
+                    done = [f for f in added
+                            if f.endswith(".mp4") and not f.endswith(".crdownload")]
+                    if done:
+                        new_file = done[0]
+                        new_dir = d
+                        break
+                    # Còn đang tải → log progress
+                    partial = [f for f in added if f.endswith(".crdownload")]
+                    if partial:
+                        elapsed = int(time.time() - (deadline - 90))
+                        self.log(f"   ⬇️ Đang tải... {partial[0]} ({elapsed}s)")
+                if new_file:
+                    break
+
+            if not new_file:
+                self.log("⚠️ Hết giờ 90s — file không xuất hiện")
+                return False
+
+            # ── Bước 4: Chờ file ổn định (không còn ghi) ──
+            src = os.path.join(new_dir, new_file)
+            self.log(f"⏳ Chờ file ổn định: {new_file}")
+            prev_size = -1
+            stable_count = 0
+            for _ in range(15):  # tối đa 15 lần × 1s = 15s
+                time.sleep(1)
+                try:
+                    cur_size = os.path.getsize(src)
+                    if cur_size == prev_size and cur_size > 0:
+                        stable_count += 1
+                        if stable_count >= 2:  # ổn định 2 lần liên tiếp
+                            break
+                    else:
+                        stable_count = 0
+                    prev_size = cur_size
+                except: break
+
+            # ── Bước 5: Đổi tên theo thứ tự, đảm bảo không trùng ──
+            dst = os.path.join(save_dir, filename)
+            if os.path.exists(dst):
+                ts = time.strftime("%H%M%S")
+                dst = os.path.join(save_dir, filename.replace(".mp4", f"_{ts}.mp4"))
+
+            shutil.move(src, dst)
+            size_mb = os.path.getsize(dst) / 1024 / 1024
+            self.log(f"✅ Đã lưu: {os.path.basename(dst)} ({size_mb:.1f} MB)")
+            return True
+
+        except Exception as e:
+            self.log(f"❌ click_download: {e}")
+            return False
+
+    def upload_image(self, image_path):
+        """Upload ảnh lên Flow UI mới:
+        Nút + (bottom) → Modal media panel → Icon ↑ upload → file input → xác nhận
+        """
+        try:
+            image_path = str(Path(image_path).resolve())
+            if not os.path.exists(image_path):
+                self.log(f"❌ File không tồn tại: {image_path}")
+                return False
+
+            # ── Bước 1: Click nút "+" ở góc dưới trái ──
+            # Nút + trong prompt bar (chứa span có text 'add_2' hoặc aria-label add)
+            plus_btn = None
+            plus_xpaths = [
+                "//button[.//span[normalize-space()='add_2']]",
+                "//button[@aria-label='Add' or @aria-label='Thêm']",
+                "//button[contains(@class,'add') and not(contains(.,'arrow'))]",
+            ]
+            for xp in plus_xpaths:
+                try:
+                    el = WebDriverWait(self.driver, 8).until(
+                        EC.element_to_be_clickable((By.XPATH, xp))
+                    )
+                    if el:
+                        plus_btn = el
+                        break
+                except: continue
+
+            if not plus_btn:
+                self.log("⚠ Không thấy nút + — thử tìm file input trực tiếp")
+            else:
+                ActionChains(self.driver).move_to_element(plus_btn).click().perform()
+                self.log("✅ Đã click nút +")
+                time.sleep(1.5)  # chờ modal/panel mở
+
+            # ── Bước 2: Tìm nút ↑ (upload) trong panel media ──
+            # Panel có search bar "Tìm kiếm các thành phần" + icon upload bên phải
+            upload_icon = None
+            upload_xpaths = [
+                "//input[@placeholder[contains(.,'Tìm kiếm')]]/following-sibling::button",
+                "//input[@placeholder[contains(.,'Search')]]/following-sibling::button",
+                "//button[.//span[normalize-space()='file_upload' or normalize-space()='upload']]",
+                "//button[@aria-label[contains(.,'upload') or contains(.,'Upload') or contains(.,'Tải')]]",
+                # Icon ↑ thường là button trong search container
+                "//div[.//input[@placeholder]]//button[last()]",
+            ]
+            for xp in upload_xpaths:
+                try:
+                    el = WebDriverWait(self.driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, xp))
+                    )
+                    if el:
+                        upload_icon = el
+                        break
+                except: continue
+
+            if upload_icon:
+                ActionChains(self.driver).move_to_element(upload_icon).click().perform()
+                self.log("✅ Đã click icon upload ↑")
+                time.sleep(1.0)
+            else:
+                self.log("⚠ Không thấy icon upload — thử unhide file input")
+
+            # ── Bước 3: Unhide tất cả input[type=file] và send_keys ──
+            self.driver.execute_script("""
+                document.querySelectorAll("input[type='file']").forEach(function(el) {
+                    el.style.cssText = 'display:block!important;opacity:1!important;' +
+                                       'visibility:visible!important;width:1px!important;height:1px!important;';
+                });
+            """)
+            time.sleep(0.4)
+
+            inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            file_input = None
+            for inp in inputs:
+                accept = inp.get_attribute("accept") or ""
+                if "image" in accept or "video" in accept or "*" in accept:
+                    file_input = inp
+                    break
+            if not file_input and inputs:
+                file_input = inputs[-1]  # lấy cái mới nhất
+
+            if not file_input:
+                self.log("❌ Không tìm thấy input[type=file]")
+                return False
+
+            file_input.send_keys(image_path)
+            self.log(f"📤 Đang upload: {Path(image_path).name}")
+
+            # ── Bước 4: Chờ thumbnail xuất hiện trong panel (xác nhận upload OK) ──
+            self.log("⏳ Chờ xác nhận upload...")
+            deadline = time.time() + 25
+            while time.time() < deadline:
+                time.sleep(2)
+                try:
+                    # Thumbnail ảnh vừa upload sẽ có src chứa blob hoặc googleusercontent
+                    thumbs = self.driver.find_elements(
+                        By.XPATH,
+                        "//img[contains(@src,'blob:') or contains(@src,'googleusercontent') or contains(@src,'data:image')]"
+                    )
+                    if thumbs:
+                        self.log(f"✅ Upload OK: {Path(image_path).name} ({len(thumbs)} ảnh trong panel)")
+                        return True
+                except: pass
+
+            self.log(f"⚠ Không xác nhận được upload (hết 25s) — có thể vẫn OK")
+            return True
+
+        except Exception as e:
+            self.log(f"❌ upload_image: {e}")
+            return False
+
+
+
+# ─── Màu nền tối chuyên nghiệp ───
+BG      = "#0D1117"   # nền chính
+CARD    = "#161B22"   # card/frame
+BORDER  = "#30363D"   # viền
+TEXT    = "#E6EDF3"   # chữ sáng
+MUTED   = "#8B949E"   # chữ mờ
+ACCENT  = "#58A6FF"   # xanh dương
+GREEN   = "#3FB950"   # xanh lá
+RED     = "#F85149"   # đỏ
+ORANGE  = "#D29922"   # cam/vàng
+PURPLE  = "#BC8CFF"   # tím
+
+# ═══════════════════════════════════════════════════════
+# MAIN APP
+# ═══════════════════════════════════════════════════════
+class VeoApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("VEO 3 FLOW PRO  —  by TechViet AI")
+        self.root.geometry("1060x700")
+        self.root.resizable(True, True)
+        self.root.configure(bg=BG)
+
+        self.bc = BrowserController(log_fn=self.log)
+        self.characters = {}   # {tên: đường_dẫn_ảnh}
+        self.running = False
+
+        self._setup_style()
+        self._build_ui()
+
+    def _setup_style(self):
+        """Thiết lập ttk.Style cho dark theme"""
+        s = ttk.Style()
+        s.theme_use("clam")
+        # Notebook
+        s.configure("TNotebook", background=BG, borderwidth=0)
+        s.configure("TNotebook.Tab", background=CARD, foreground=MUTED,
+                    padding=[14, 6], font=("Segoe UI", 9, "bold"))
+        s.map("TNotebook.Tab",
+              background=[("selected", ACCENT)],
+              foreground=[("selected", "white")])
+        # Progressbar
+        s.configure("TProgressbar", troughcolor=CARD, background=ACCENT,
+                    borderwidth=0, thickness=6)
+        # Frame/LabelFrame
+        s.configure("Dark.TFrame", background=BG)
+        s.configure("Card.TFrame", background=CARD)
+
+    # ─── LOG ───────────────────────────────
+    def log(self, msg):
+        def _do():
+            ts = time.strftime("%H:%M:%S")
+            self.log_text.config(state=NORMAL)
+            self.log_text.insert(END, f"[{ts}] {msg}\n")
+            self.log_text.see(END)
+            self.log_text.config(state=DISABLED)
+        self.root.after(0, _do)
+
+    def set_status(self, msg):
+        self.root.after(0, lambda: self.status_var.set(msg))
+
+    # ─── UI BUILD ──────────────────────────
+
+    # ─── UI BUILD ──────────────────────────────────────
+    def _build_ui(self):
+        # ── Header banner ──
+        hdr = Frame(self.root, bg="#0A0F1A", height=56)
+        hdr.pack(fill=X)
+        hdr.pack_propagate(False)
+        Label(hdr, text="🎬  VEO 3 FLOW PRO",
+              font=("Segoe UI", 16, "bold"), bg="#0A0F1A", fg=ACCENT
+              ).pack(side=LEFT, padx=18, pady=10)
+        Label(hdr, text="Tự động tạo video chất lượng cao · Google Flow AI",
+              font=("Segoe UI", 9), bg="#0A0F1A", fg=MUTED
+              ).pack(side=LEFT, padx=2)
+        self.status_var = StringVar(value="◉  Chưa kết nối")
+        Label(hdr, textvariable=self.status_var,
+              font=("Segoe UI", 9, "bold"), bg="#0A0F1A", fg=RED
+              ).pack(side=RIGHT, padx=20)
+
+        # ── Notebook ──
+        self.nb = ttk.Notebook(self.root)
+        self.nb.pack(fill=BOTH, expand=True)
+
+        self._tab_note()
+        self._tab_browser()
+        self._tab_text2video()
+        self._tab_char_setup()
+        self._tab_create_video()
+        self._tab_logs()
+        self._tab_merge()
+
+        # ── Status bar ──
+        sb = Frame(self.root, bg=CARD, height=22)
+        sb.pack(fill=X, side=BOTTOM)
+        sb.pack_propagate(False)
+        Label(sb, text="VEO 3 FLOW PRO  v2.0   ©2025 TechViet AI",
+              font=("Segoe UI", 8), bg=CARD, fg=MUTED).pack(side=RIGHT, padx=10)
+        Label(sb, text="✦ Đặt folder output riêng cho mỗi máy khi chạy song song",
+              font=("Segoe UI", 8), bg=CARD, fg=MUTED).pack(side=LEFT, padx=10)
+
+    # ── Widget helpers ──
+    def _card(self, parent, title, **kw):
+        return LabelFrame(parent, text=f"  {title}  ",
+                          font=("Segoe UI", 9, "bold"),
+                          bg=CARD, fg=ACCENT, bd=1, relief="groove",
+                          labelanchor="nw", **kw)
+
+    def _btn(self, parent, text, cmd, color=None, **kw):
+        clr = color or ACCENT
+        return Button(parent, text=text, command=cmd,
+                      bg=clr, fg="white", font=("Segoe UI", 9, "bold"),
+                      relief="flat", cursor="hand2",
+                      activebackground=clr, activeforeground="white",
+                      bd=0, **kw)
+
+    def _lbl(self, parent, text, size=9, bold=False, color=None, **kw):
+        return Label(parent, text=text,
+                     font=("Segoe UI", size, "bold" if bold else "normal"),
+                     bg=CARD, fg=color or TEXT, **kw)
+
+    # ── TAB 1: Hướng dẫn ──────────────────────────────
+    def _tab_note(self):
+        f = Frame(self.nb, bg=BG)
+        self.nb.add(f, text="📌  Hướng Dẫn")
+        hf = Frame(f, bg="#0A0F1A"); hf.pack(fill=X)
+        Label(hf, text="📌  Hướng dẫn sử dụng VEO 3 FLOW PRO",
+              font=("Segoe UI", 12, "bold"), bg="#0A0F1A", fg=ACCENT
+              ).pack(anchor=W, padx=16, pady=10)
+        txt = scrolledtext.ScrolledText(f, wrap=WORD, font=("Segoe UI", 10),
+                                        bg=CARD, fg=TEXT, insertbackground=TEXT,
+                                        relief="flat", bd=0, padx=8, pady=8)
+        txt.pack(fill=BOTH, expand=True, padx=12, pady=(0, 10))
+        txt.insert(END, """
+  ⚠️  YÊU CẦU BẮT BUỘC:
+  ─────────────────────────────────────────────
+  1. Cài Google Chrome + đăng nhập Google AI Pro tại: labs.google/fx
+  2. Cài Python packages:  pip install selenium webdriver-manager pillow
+
+  ─────────────────────────────────────────────
+  🌐  BROWSER & KẾT NỐI
+      → Mở Chrome vào Google Flow (Thường / Ẩn danh / Chrome mới)
+      → Kết nối Chrome đang mở sẵn qua remote debug port
+
+  📝  TEXT TO VIDEO  (Tab chính)
+      → Dán danh sách prompt — mỗi dòng một lệnh
+      → Hỗ trợ JSON: {"prompt":"...","style":"...","aspect_ratio":"9:16"}
+      → [START]  — Tuần tự: tạo xong rồi tải, sang prompt tiếp
+      → [RAPID]  — Submit nhanh tất cả, render SONG SONG trên cloud
+      → [STOP]   — Dừng tiến trình đang chạy
+
+  👤  NHÂN VẬT (Character Setup)
+      → Chọn ảnh nhân vật → Đặt tên ngắn (Alice, Bob, NhanVat1...)
+      → Upload lên Flow → Tool tự chèn ảnh khi tạo video
+
+  🎞️  TẠO VIDEO NHÂN VẬT (Create Video)
+      → Nhập prompt cho từng cảnh
+      → Tool tự upload ảnh + generate theo thứ tự
+
+  📋  LOGS   — Xem toàn bộ hoạt động, lưu log ra file TXT
+
+  🎬  GHÉP VIDEO — Ghép nhiều MP4 thành 1 file (cần FFmpeg)
+      → Tải FFmpeg: https://ffmpeg.org/download.html
+
+  💡  MẸO: Dùng thư mục output RIÊNG cho mỗi phiên/máy
+           để tránh lẫn file khi chạy song song.
+""")
+        txt.config(state=DISABLED)
+
+    # ── TAB 2: Browser & Kết Nối ──────────────────────
+    def _tab_browser(self):
+        f = Frame(self.nb, bg=BG)
+        self.nb.add(f, text="🌐  Kết Nối")
+
+        # Hướng dẫn nhanh
+        top = self._card(f, "📋 Quy trình kết nối")
+        top.pack(fill=X, padx=14, pady=(12, 5))
+        Label(top, text=(
+            "1️⃣  Bấm nút MỞ CHROME bên dưới  →  Đăng nhập Google nếu cần\n"
+            "2️⃣  Sau khi đăng nhập xong        →  Bấm '✔ Xác nhận đăng nhập'\n"
+            "3️⃣  Sang tab 'Text to Video'       →  Nhập prompt  →  Bấm START"
+        ), bg=CARD, fg=TEXT, font=("Segoe UI", 9), justify=LEFT
+        ).pack(anchor=W, padx=10, pady=8)
+
+        # Nút điều khiển Chrome
+        ctrl = self._card(f, "⚙️ Điều khiển Chrome")
+        ctrl.pack(fill=X, padx=14, pady=5)
+
+        row1 = Frame(ctrl, bg=CARD); row1.pack(fill=X, padx=8, pady=(8, 3))
+        self._btn(row1, "  🖥  Mở Chrome (Thường)  ",
+                  lambda: self._run_bg(lambda: self.bc.open("normal", download_dir=OUTPUT_DIR_TEXT)),
+                  color=ACCENT).pack(side=LEFT, fill=X, expand=True, padx=(0,4), ipady=8)
+        self._btn(row1, "  🔒  Mở Chrome Ẩn Danh  ",
+                  lambda: self._run_bg(lambda: self.bc.open("incognito", download_dir=OUTPUT_DIR_TEXT)),
+                  color="#444C56").pack(side=LEFT, fill=X, expand=True, padx=(4,0), ipady=8)
+
+        row2 = Frame(ctrl, bg=CARD); row2.pack(fill=X, padx=8, pady=3)
+        self._btn(row2, "  ✨  Chrome Hoàn Toàn Mới (Fresh)  ",
+                  lambda: self._run_bg(lambda: self.bc.open("fresh", download_dir=OUTPUT_DIR_TEXT)),
+                  color=PURPLE).pack(side=LEFT, fill=X, expand=True, padx=(0,4), ipady=8)
+        self._btn(row2, "  🔗  Kết Nối Chrome Đang Mở  ",
+                  lambda: self._run_bg(self._connect_existing_chrome),
+                  color=ORANGE).pack(side=LEFT, fill=X, expand=True, padx=(4,0), ipady=8)
+
+        Frame(ctrl, bg=BORDER, height=1).pack(fill=X, padx=8, pady=8)
+
+        self._btn(ctrl, "  ✔  Xác nhận đăng nhập xong → Bắt đầu sử dụng  ",
+                  self._confirm_login, color=GREEN
+                  ).pack(fill=X, padx=8, pady=(0,5), ipady=10)
+
+        row3 = Frame(ctrl, bg=CARD); row3.pack(fill=X, padx=8, pady=(0,8))
+        def refresh_status():
+            s = self.bc.get_status()
+            self.status_var.set(f"◉  {s}")
+        self._btn(row3, "🔄 Cập nhật trạng thái", refresh_status,
+                  color="#21262D").pack(side=LEFT, padx=(0,4), ipady=5)
+
+        def test_paste():
+            if not self.bc.is_alive():
+                messagebox.showerror("Lỗi", "Chưa mở Chrome!")
+                return
+            sample = "A beautiful sunset over the ocean, cinematic lighting, 8K"
+            self.log("🧪 TEST: Mở project mới + dán prompt mẫu...")
+            self.nb.select(5)
+            def _run():
+                ok = self.bc.new_project()
+                if ok:
+                    self.bc.set_prompt(sample)
+                    self.log("✅ TEST xong — kiểm tra Chrome xem prompt đã hiện chưa!")
+                else:
+                    self.log("❌ TEST thất bại")
+            self._run_bg(_run)
+        self._btn(row3, "🧪 TEST: Dán prompt mẫu", test_paste,
+                  color="#1B4721").pack(side=LEFT, ipady=5)
+
+    def _confirm_login(self):
+        self.log("✅ Đã xác nhận đăng nhập!")
+        self.set_status("Trạng thái: ✅ Đã đăng nhập")
+        messagebox.showinfo("OK", "Đã xác nhận đăng nhập!\nBây giờ chuyển sang tab Text to Video để bắt đầu.")
+
+    def _connect_existing_chrome(self):
+        """Kết nối tới Chrome đang mở qua remote debugging port"""
+        ok = self.bc.connect_existing()
+        if ok:
+            self.set_status("Trạng thái: ✅ Kết nối Chrome thành công")
+            self.root.after(0, lambda: messagebox.showinfo(
+                "✅ Kết nối OK",
+                f"Đã kết nối Chrome thành công!\n{self.bc.get_status()}\n\nBây giờ sang tab Text to Video để tạo video."
+            ))
+        else:
+            self.root.after(0, lambda: messagebox.showerror(
+                "❌ Kết nối thất bại",
+                "Không kết nối được Chrome!\n\n"
+                "Giải pháp:\n"
+                "1. ĐÓNG Chrome đang mở\n"
+                "2. Bấm 'MỞ CHROME' trong tool\n"
+                "3. Đăng nhập Google trên Chrome đó\n"
+                "4. Bấm 'GỬI ĐĂNG NHẬP'\n"
+                "5. Sang tab Text to Video → START"
+            ))
+
+    # ── TAB 3: Text to Video ──────────────────────────────
+    def _tab_text2video(self):
+        f = Frame(self.nb, bg=BG)
+        self.nb.add(f, text="📝  Text to Video")
+
+        # Prompts
+        lf = self._card(f, "📝 Danh sách Prompt  (mỗi dòng 1 lệnh — hỗ trợ JSON)")
+        lf.pack(fill=BOTH, expand=True, padx=12, pady=(10,4))
+
+        mode_f = Frame(lf, bg=CARD); mode_f.pack(anchor=W, pady=(4,2))
+        Label(mode_f, text="Định dạng nhập:  ", bg=CARD, fg=MUTED,
+              font=("Segoe UI", 9)).pack(side=LEFT)
+        self.tv_mode = StringVar(value="normal")
+        for txt, val in [("Thông thường (mỗi dòng 1 prompt)", "normal"),
+                          ("JSON nâng cao (scene_1, scene_2...)", "json")]:
+            Radiobutton(mode_f, text=txt, variable=self.tv_mode, value=val,
+                        bg=CARD, fg=TEXT, selectcolor=BG,
+                        activebackground=CARD, font=("Segoe UI", 9)
+                        ).pack(side=LEFT, padx=6)
+
+        self.tv_prompts = scrolledtext.ScrolledText(
+            lf, height=10, font=("Consolas", 9),
+            bg="#0D1117", fg=TEXT, insertbackground=TEXT, relief="flat")
+        self.tv_prompts.pack(fill=BOTH, expand=True, pady=(2,6))
+        self.tv_prompts.insert(END, "A cinematic sunset over the ocean, 8K, dramatic lighting\n"
+                                    "A futuristic city at night, neon lights, rain, blade runner style")
+
+        # Settings
+        sf = self._card(f, "⚙️ Cài đặt đầu ra")
+        sf.pack(fill=X, padx=12, pady=4)
+        r1 = Frame(sf, bg=CARD); r1.pack(fill=X, pady=3, padx=8)
+        Label(r1, text="Tên file:", bg=CARD, fg=MUTED,
+              font=("Segoe UI", 9)).pack(side=LEFT)
+        self.tv_base = Entry(r1, width=20, font=("Segoe UI", 9),
+                             bg="#0D1117", fg=TEXT, insertbackground=TEXT, relief="flat")
+        self.tv_base.insert(0, "video")
+        self.tv_base.pack(side=LEFT, padx=6, ipady=3)
+        Label(r1, text="→  video_01.mp4, video_02.mp4, ...",
+              bg=CARD, fg=MUTED, font=("Segoe UI", 8)).pack(side=LEFT)
+
+        r2 = Frame(sf, bg=CARD); r2.pack(fill=X, pady=3, padx=8)
+        Label(r2, text="Lưu tại:", bg=CARD, fg=MUTED,
+              font=("Segoe UI", 9)).pack(side=LEFT)
+        self.tv_out = Entry(r2, width=55, font=("Segoe UI", 9),
+                            bg="#0D1117", fg=TEXT, insertbackground=TEXT, relief="flat")
+        self.tv_out.insert(0, OUTPUT_DIR_TEXT)
+        self.tv_out.pack(side=LEFT, padx=6, ipady=3)
+        self._btn(r2, "📂", lambda: self._browse(self.tv_out),
+                  color="#21262D").pack(side=LEFT, ipady=3, ipadx=4)
+
+        # Delay
+        df = self._card(f, "⏱ Độ trễ giữa các prompt")
+        df.pack(fill=X, padx=12, pady=4)
+        df_r = Frame(df, bg=CARD); df_r.pack(anchor=W, padx=8, pady=4)
+        self.tv_delay = StringVar(value="normal")
+        for txt, val in [("Bình thường (5s)", "normal"),
+                          ("Gấp đôi (10s)", "double"),
+                          ("Ngẫu nhiên (6-15s)", "random")]:
+            Radiobutton(df_r, text=txt, variable=self.tv_delay, value=val,
+                        bg=CARD, fg=TEXT, selectcolor=BG,
+                        activebackground=CARD, font=("Segoe UI", 9)
+                        ).pack(side=LEFT, padx=8)
+
+        # Timeout
+        tf = self._card(f, "⬇️ Chờ video xong → Tự động tải (thoát sớm khi xong)")
+        tf.pack(fill=X, padx=12, pady=4)
+        self.tv_timeout = StringVar(value="600")
+        timeout_opts = [
+            ("TỰ ĐỘNG — Chờ đến khi xong, tối đa 10 phút  ⬇️  Tải ngay", "600"),
+            ("Tối đa 5 phút  ⬇️  Tải ngay khi xong", "300"),
+            ("Tối đa 3 phút  ⬇️  Tải ngay khi xong", "180"),
+            ("Tối đa 1 phút  ⬇️  Tải ngay khi xong", "60"),
+            ("30 giây  (submit nhanh, không tải về)", "30"),
+        ]
+        for txt, val in timeout_opts:
+            Radiobutton(tf, text=txt, variable=self.tv_timeout, value=val,
+                        bg=CARD, fg=TEXT, selectcolor=BG,
+                        activebackground=CARD, font=("Segoe UI", 9)
+                        ).pack(anchor=W, padx=12)
+        Label(tf, text="  ℹ️  Tool thoát ngay khi video xong, không cần đợi hết giờ!",
+              font=("Segoe UI", 8), bg=CARD, fg=MUTED).pack(anchor=W, padx=20, pady=(0,4))
+
+        # Progress + buttons
+        self.tv_progress = ttk.Progressbar(f, mode="indeterminate", style="TProgressbar")
+        self.tv_progress.pack(fill=X, padx=12, pady=(6,2))
+        self.tv_status_lbl = Label(f, text="", font=("Segoe UI", 8), bg=BG, fg=MUTED)
+        self.tv_status_lbl.pack()
+
+        btn_row = Frame(f, bg=BG); btn_row.pack(fill=X, padx=12, pady=8)
+        self._btn(btn_row, "  ▶  START — Tuần tự + Tải về",
+                  self._start_text2video, color=GREEN
+                  ).pack(side=LEFT, fill=X, expand=True, ipady=9, padx=(0,4))
+        self._btn(btn_row, "  ⚡  RAPID — Submit nhanh, render song song",
+                  self._start_rapid, color=ORANGE
+                  ).pack(side=LEFT, fill=X, expand=True, ipady=9, padx=(0,4))
+        self._btn(btn_row, "  ⏹  STOP",
+                  self._stop, color=RED
+                  ).pack(side=LEFT, ipady=9, ipadx=8)
+
+    def _start_text2video(self):    def _start_text2video(self):
+        raw = self.tv_prompts.get("1.0", END).strip()
+        lines = [l.strip() for l in raw.splitlines() if l.strip() and not l.startswith("#")]
+        if not lines:
+            messagebox.showerror("Lỗi", "Chưa nhập prompt!")
+            return
+        if not self.bc.is_alive():
+            messagebox.showerror("Lỗi", "Chưa mở Chrome! Vào tab Browser & Setup trước.")
+            return
+        out_dir = self.tv_out.get()
+        os.makedirs(out_dir, exist_ok=True)
+        self.log(f"🚀 Bắt đầu Text→Video: {len(lines)} prompt(s)")
+        self.nb.select(5)  # switch to Logs tab
+        self._run_bg(lambda: self._t2v_worker(lines, out_dir))
+
+    @staticmethod
+    def _parse_line(line):
+        """Parse 1 dòng: JSON object hoặc plain text.
+        Trả về: (prompt_text, aspect_ratio, duration, extra_info)"""
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                obj = json.loads(line)
+                prompt = obj.get("prompt", "")
+                style = obj.get("style", "")
+                camera = obj.get("camera_motion", "")
+                aspect = obj.get("aspect_ratio", "16:9")
+                duration = obj.get("duration", 8)
+                # Ghép style + camera vào cuối prompt để hướng dẫn cảnh
+                extra_parts = []
+                if style: extra_parts.append(style)
+                if camera: extra_parts.append(camera)
+                full_prompt = prompt
+                if extra_parts:
+                    full_prompt = f"{prompt}. Style: {', '.join(extra_parts)}"
+                return full_prompt, aspect, duration, obj
+            except json.JSONDecodeError:
+                pass
+        # Plain text
+        return line, "16:9", 8, {}
+
+    def _t2v_worker(self, lines, out_dir):
+        self.running = True
+        self.root.after(0, self.tv_progress.start)
+        import random
+        try:
+            for i, line in enumerate(lines, 1):
+                if not self.running: break
+
+                # Parse dòng JSON hoặc plain
+                prompt_text, aspect_ratio, duration, meta = self._parse_line(line)
+                self.log(f"\n── [{i}/{len(lines)}] {prompt_text[:70]}...")
+                if meta:
+                    self.log(f"   📌 Ratio: {aspect_ratio} | Duration: {duration}s | Style: {meta.get('style','')}")
+
+                delay_map = {"normal": 5, "double": 10, "random": None}
+                d_val = delay_map.get(self.tv_delay.get(), 5)
+                delay = d_val if d_val is not None else random.randint(6, 15)
+
+                ok = self.bc.new_project()
+                if not ok: continue
+                time.sleep(2)
+
+                # Set tỷ lệ nếu có trong JSON
+                if aspect_ratio and aspect_ratio != "16:9":
+                    self.bc.set_aspect_ratio(aspect_ratio)
+
+                ok = self.bc.set_prompt(prompt_text)
+                if not ok: continue
+                time.sleep(0.8)
+
+                ok = self.bc.click_generate()
+                if not ok: continue
+
+                ok = self.bc.wait_for_video(timeout=int(self.tv_timeout.get()))
+                if ok:
+                    fname = f"{self.tv_base.get()}_{i:02d}.mp4"
+                    # Cập nhật thư mục tải về via CDP (đảm bảo đúng folder)
+                    try:
+                        self.bc.driver.execute_cdp_cmd(
+                            "Browser.setDownloadBehavior",
+                            {"behavior": "allow", "downloadPath": out_dir}
+                        )
+                    except:
+                        pass
+                    self.bc.click_download(out_dir, fname)
+                else:
+                    self.log(f"   ⏭ Bỏ qua tải — chuyển prompt tiếp")
+
+                self.log(f"⏳ Chờ {delay}s trước prompt tiếp...")
+                time.sleep(delay)
+        finally:
+            self.running = False
+            self.root.after(0, self.tv_progress.stop)
+            self.root.after(0, lambda: self.tv_status_lbl.config(text=""))
+            self.log(f"\n✅ Hoàn tất Text→Video! Video đã lưu tại:\n   {out_dir}")
+
+    def _stop(self):
+        """Dừng worker đang chạy"""
+        if self.running:
+            self.running = False
+            self.log("⏹ Đã gửi lệnh dừng — chờ bước hiện tại kết thúc...")
+        else:
+            self.log("ℹ️ Không có tiến trình nào đang chạy")
+
+    def _start_rapid(self):
+        """⚡ Rapid Mode: Submit tất cả nhanh → render song song trên cloud"""
+        raw = self.tv_prompts.get("1.0", END).strip()
+        lines = [l.strip() for l in raw.splitlines() if l.strip() and not l.startswith("#")]
+        if not lines:
+            messagebox.showerror("Lỗi", "Chưa nhập prompt!")
+            return
+        if not self.bc.is_alive():
+            messagebox.showerror("Lỗi", "Chưa mở Chrome!")
+            return
+        out_dir = self.tv_out.get()
+        os.makedirs(out_dir, exist_ok=True)
+        self.log(f"⚡ RAPID MODE: Submit {len(lines)} prompt(s) nhanh → render song song!")
+        self.nb.select(5)
+        self._run_bg(lambda: self._rapid_worker(lines, out_dir))
+
+    def _rapid_worker(self, lines, out_dir):
+        """Submit tất cả nhanh (30s/prompt), rồi monitor download folder"""
+        self.running = True
+        self.root.after(0, self.tv_progress.start)
+        import random
+
+        # ─── PHASE 1: Submit tất cả prompt nhanh ───
+        total = len(lines)
+        submitted = 0
+        try:
+            for i, line in enumerate(lines, 1):
+                if not self.running: break
+                prompt_text, aspect_ratio, duration, meta = self._parse_line(line)
+                self.log(f"\n⚡ [{i}/{total}] Submit: {prompt_text[:60]}...")
+                self.root.after(0, lambda i=i, t=total: self.tv_status_lbl.config(
+                    text=f"⚡ Submit {i}/{t} — render song song trên cloud..."))
+
+                ok = self.bc.new_project()
+                if not ok: continue
+
+                if aspect_ratio and aspect_ratio != "16:9":
+                    self.bc.set_aspect_ratio(aspect_ratio)
+
+                ok = self.bc.set_prompt(prompt_text)
+                if not ok: continue
+
+                ok = self.bc.click_generate()
+                if ok:
+                    submitted += 1
+                    self.log(f"   ✅ Đã submit #{i}")
+                else:
+                    self.log(f"   ⚠ Submit #{i} thất bại")
+
+                # Chờ 30s giữa các prompt (đủ để Flow nhận request)
+                if i < total and self.running:
+                    for _ in range(30):
+                        if not self.running: break
+                        time.sleep(1)
+
+        except Exception as e:
+            self.log(f"❌ Submit error: {e}")
+
+        self.log(f"\n⚡ Đã submit {submitted}/{total} prompt. Bắt đầu monitor download...")
+        self.root.after(0, lambda: self.tv_status_lbl.config(
+            text=f"📥 Đang chờ {submitted} video từ cloud..."))
+
+        # ─── PHASE 2: Monitor folder, đổi tên tuần tự khi file về ───
+        if submitted == 0:
+            self.running = False
+            self.root.after(0, self.tv_progress.stop)
+            return
+
+        snap = set(os.listdir(out_dir))
+        base = self.tv_base.get()
+        video_counter = 1
+        # Tính video_counter tiếp theo (tránh ghi đè file cũ)
+        while os.path.exists(os.path.join(out_dir, f"{base}_{video_counter:02d}.mp4")):
+            video_counter += 1
+
+        deadline = time.time() + submitted * 600  # 10 phút/video tối đa
+        found = 0
+        prev_size_map = {}  # {filename: size}
+
+        while time.time() < deadline and found < submitted and self.running:
+            time.sleep(3)
+            try:
+                current = set(os.listdir(out_dir))
+                added = current - snap
+                # Chỉ lấy file .mp4 mới (không phải .crdownload)
+                new_mp4s = sorted([f for f in added
+                                   if f.endswith(".mp4") and not f.endswith(".crdownload")])
+                for fname in new_mp4s:
+                    src = os.path.join(out_dir, fname)
+                    # Chờ file ổn định
+                    sz = os.path.getsize(src) if os.path.exists(src) else 0
+                    if prev_size_map.get(fname) == sz and sz > 0:
+                        # File ổn định → đổi tên theo thứ tự
+                        dst_name = f"{base}_{video_counter:02d}.mp4"
+                        dst = os.path.join(out_dir, dst_name)
+                        if not os.path.exists(dst):
+                            shutil.move(src, dst)
+                            sz_mb = os.path.getsize(dst) / 1024 / 1024
+                            self.log(f"✅ Tải về #{video_counter}: {dst_name} ({sz_mb:.1f} MB)")
+                            snap.add(dst_name)  # tránh detect lại
+                            video_counter += 1
+                            found += 1
+                            self.root.after(0, lambda f=found, s=submitted:
+                                self.tv_status_lbl.config(text=f"📥 Đã nhận {f}/{s} video"))
+                    else:
+                        prev_size_map[fname] = sz
+            except Exception as e:
+                self.log(f"⚠ Monitor: {e}")
+
+        self.running = False
+        self.root.after(0, self.tv_progress.stop)
+        self.root.after(0, lambda: self.tv_status_lbl.config(text=""))
+        self.log(f"\n✅ RAPID xong! Nhận {found}/{submitted} video → {out_dir}")
+
+    # ── TAB 4: Nhân Vật ─────────────────────────────────
+    def _tab_char_setup(self):
+        f = Frame(self.nb, bg=BG)
+        self.nb.add(f, text="👤  Nhân Vật")
+
+        # Hướng dẫn
+        guide = self._card(f, "📋 Hướng dẫn")
+        guide.pack(fill=X, padx=12, pady=(10,5))
+        Label(guide, text=(
+            "1. Chon anh nhan vat -> chon nhieu anh (khong gioi han)\n"
+            "2. Dat ten ngan gon cho tung nhan vat  (VD: Alice, Bob, NhanVat1)\n"
+            "3. Bam Upload tat ca len Flow - tool tu upload theo thu tu\n"
+            "4. Sang tab Tao Video de generate video co nhan vat"
+        ), bg=CARD, fg=TEXT, font=("Segoe UI", 9), justify=LEFT
+        ).pack(anchor=W, padx=10, pady=8)
+
+        # Danh sách nhân vật
+        list_lf = self._card(f, "📂 Danh sách nhân vật  (tên: đường dẫn ảnh)")
+        list_lf.pack(fill=BOTH, expand=True, padx=12, pady=5)
+        self.char_list = scrolledtext.ScrolledText(
+            list_lf, height=9, font=("Consolas", 9), state=DISABLED,
+            bg="#0D1117", fg=TEXT, relief="flat")
+        self.char_list.pack(fill=BOTH, expand=True, padx=4, pady=4)
+
+        # Nút thao tác
+        btn_f = Frame(f, bg=BG); btn_f.pack(fill=X, padx=12, pady=6)
+        self._btn(btn_f, "  📁  Chọn ảnh nhân vật (nhiều ảnh)",
+                  self._choose_char_images, color=ACCENT
+                  ).pack(side=LEFT, fill=X, expand=True, ipady=8, padx=(0,4))
+        self._btn(btn_f, "  ⬆️  Upload tất cả lên Flow",
+                  self._upload_chars, color=GREEN
+                  ).pack(side=LEFT, fill=X, expand=True, ipady=8, padx=(0,4))
+        self._btn(btn_f, "  🗑  Xóa hết",
+                  self._clear_chars, color="#444C56"
+                  ).pack(side=LEFT, ipady=8, ipadx=6)
+
+        # Progress upload
+        up_f = self._card(f, "📤 Tiến độ upload")
+        up_f.pack(fill=X, padx=12, pady=5)
+        self.char_progress = ttk.Progressbar(up_f, mode="determinate", style="TProgressbar")
+        self.char_progress.pack(fill=X, padx=8, pady=(6,2))
+        self.char_status_lbl = Label(up_f, text="Chưa upload",
+                                     font=("Segoe UI", 9), bg=CARD, fg=MUTED)
+        self.char_status_lbl.pack(pady=(0,6))
+
+    def _choose_char_images(self):    def _choose_char_images(self):
+        paths = filedialog.askopenfilenames(
+            title="Chọn ảnh nhân vật",
+            filetypes=[("Images", "*.jpg *.jpeg *.png *.webp *.jfif"), ("All", "*.*")]
+        )
+        if not paths: return
+        self.characters.clear()
+        for idx, p in enumerate(paths, 1):
+            stem = Path(p).stem
+            # Gợi ý tên đơn giản: nếu tên file là UUID thì dùng 'Nhan_vat_1'
+            if len(stem) > 20 or '-' in stem:
+                default_name = f"Nhan_vat_{idx}"
+            else:
+                default_name = stem
+            name = self._ask_name(default_name)
+            if name:
+                self.characters[name] = p
+
+        self.char_list.config(state=NORMAL)
+        self.char_list.delete("1.0", END)
+        for n, pth in self.characters.items():
+            self.char_list.insert(END, f"{n}: {pth}\n")
+        self.char_list.config(state=DISABLED)
+        self.log(f"✅ Đã chọn {len(self.characters)} nhân vật: {', '.join(self.characters.keys())}")
+        # Cập nhật Create Video tab
+        self._refresh_char_display()
+
+    def _ask_name(self, default=""):
+        dlg = Toplevel(self.root)
+        dlg.title("Đặt tên nhân vật")
+        dlg.geometry("360x150")
+        dlg.configure(bg=BG)
+        dlg.grab_set()
+        Label(dlg, text=f"  Đặt tên nhân vật cho ảnh: {default[:40]}",
+              font=("Segoe UI", 9), bg=BG, fg=TEXT).pack(pady=8, anchor=W, padx=10)
+        var = StringVar(value=default)
+        Entry(dlg, textvariable=var, width=32, font=("Segoe UI", 11), bg=CARD, fg=TEXT, insertbackground=TEXT, relief="flat").pack(pady=4, ipady=4)
+        result = [None]  # Bug fix: default None, không phải default filename
+        def ok():
+            v = var.get().strip()
+            result[0] = v if v else None
+            dlg.destroy()
+        def on_close():
+            result[0] = None  # X-close = bỏ qua ảnh này
+            dlg.destroy()
+        dlg.protocol("WM_DELETE_WINDOW", on_close)
+        Button(dlg, text="OK", command=ok, bg=GREEN, fg="white", width=10).pack(pady=6)
+        dlg.wait_window()
+        return result[0]  # None nếu bỏ qua, string nếu có tên
+
+    def _clear_chars(self):
+        self.characters.clear()
+        self.char_list.config(state=NORMAL)
+        self.char_list.delete("1.0", END)
+        self.char_list.config(state=DISABLED)
+
+    def _upload_chars(self):
+        if not self.characters:
+            messagebox.showerror("Lỗi", "Chưa chọn ảnh nhân vật!")
+            return
+        if not self.bc.is_alive():
+            messagebox.showerror("Lỗi", "Chưa mở Chrome!")
+            return
+        self._run_bg(self._upload_chars_worker)
+
+    def _upload_chars_worker(self):
+        names = list(self.characters.keys())
+        total = len(names)
+        self.root.after(0, lambda: self.char_progress.config(maximum=total, value=0))
+        self.log(f"📤 Bắt đầu upload {total} ảnh nhân vật...")
+        ok_count = 0
+        for i, name in enumerate(names, 1):
+            path = self.characters[name]
+            self.log(f"📤 Upload [{i}/{total}]: {name} ({Path(path).name})")
+            self.root.after(0, lambda l=f"Uploading {name}... ({i}/{total})": self.char_status_lbl.config(text=l))
+            # KHÔNG gọi new_project() — upload tất cả vào project hiện tại
+            ok = self.bc.upload_image(path)
+            if ok:
+                ok_count += 1
+            self.root.after(0, lambda v=i: self.char_progress.config(value=v))
+            time.sleep(1.5)  # chờ mọi thứ ổn định giữa các ảnh
+        msg = f"✅ Upload xong {ok_count}/{total} nhân vật!"
+        self.root.after(0, lambda: self.char_status_lbl.config(text=msg))
+        self.log(msg)
+
+    # ── TAB 5: Tạo Video Nhân Vật ───────────────────────
+    def _tab_create_video(self):
+        f = Frame(self.nb, bg=BG)
+        self.nb.add(f, text="🎞️  Tạo Video")
+
+        # Hướng dẫn
+        guide = self._card(f, "📋 Hướng dẫn")
+        guide.pack(fill=X, padx=12, pady=(10,4))
+        Label(guide, text=(
+            "1. Nhap danh sach prompt (moi dong 1 canh)\n"
+            "2. Bam START -> Tool tu dong upload anh nhan vat + generate tung video\n"
+            "Luu y: Prompt co ten nhan vat -> chen dung anh do | Khong co ten -> upload tat ca"
+        ), bg=CARD, fg=TEXT, font=("Segoe UI", 9), justify=LEFT
+        ).pack(anchor=W, padx=10, pady=6)
+
+        # Hiển thị nhân vật đã setup
+        cv_char = self._card(f, "👤 Nhân vật đã thiết lập")
+        cv_char.pack(fill=X, padx=12, pady=4)
+        self.cv_char_display = Label(cv_char,
+                                     text="Chưa có nhân vật. Vào tab 'Nhân Vật' để thiết lập trước.",
+                                     font=("Segoe UI", 9), bg=CARD, fg=MUTED)
+        self.cv_char_display.pack(anchor=W, padx=10, pady=6)
+
+        # Prompts
+        lf = self._card(f, "📝 Danh sách Prompt  (mỗi dòng 1 cảnh)")
+        lf.pack(fill=BOTH, expand=True, padx=12, pady=4)
+        mode_f = Frame(lf, bg=CARD); mode_f.pack(anchor=W, pady=(4,2))
+        Label(mode_f, text="Định dạng: ", bg=CARD, fg=MUTED,
+              font=("Segoe UI", 9)).pack(side=LEFT)
+        self.cv_mode = StringVar(value="normal")
+        for txt, val in [("Thông thường", "normal"),
+                          ("JSON nâng cao (scene_1, scene_2...)", "json")]:
+            Radiobutton(mode_f, text=txt, variable=self.cv_mode, value=val,
+                        bg=CARD, fg=TEXT, selectcolor=BG,
+                        activebackground=CARD, font=("Segoe UI", 9)
+                        ).pack(side=LEFT, padx=6)
+        self.cv_prompts = scrolledtext.ScrolledText(
+            lf, height=7, font=("Consolas", 9),
+            bg="#0D1117", fg=TEXT, insertbackground=TEXT, relief="flat")
+        self.cv_prompts.pack(fill=BOTH, expand=True, pady=(2,6))
+        self.cv_prompts.insert(END, "Alice và Bob đang đi dạo trong công viên\nCharlie đang chạy trên bãi biển")
+
+        # Settings
+        sf = self._card(f, "⚙️ Cài đặt đầu ra")
+        sf.pack(fill=X, padx=12, pady=4)
+        r1 = Frame(sf, bg=CARD); r1.pack(fill=X, pady=3, padx=8)
+        Label(r1, text="Tên file:", bg=CARD, fg=MUTED, font=("Segoe UI", 9)).pack(side=LEFT)
+        self.cv_base = Entry(r1, width=20, font=("Segoe UI", 9),
+                             bg="#0D1117", fg=TEXT, insertbackground=TEXT, relief="flat")
+        self.cv_base.insert(0, "character_video")
+        self.cv_base.pack(side=LEFT, padx=6, ipady=3)
+        r2 = Frame(sf, bg=CARD); r2.pack(fill=X, pady=3, padx=8)
+        Label(r2, text="Lưu tại:", bg=CARD, fg=MUTED, font=("Segoe UI", 9)).pack(side=LEFT)
+        self.cv_out = Entry(r2, width=55, font=("Segoe UI", 9),
+                            bg="#0D1117", fg=TEXT, insertbackground=TEXT, relief="flat")
+        self.cv_out.insert(0, OUTPUT_DIR_CHAR)
+        self.cv_out.pack(side=LEFT, padx=6, ipady=3)
+        self._btn(r2, "📂", lambda: self._browse(self.cv_out),
+                  color="#21262D").pack(side=LEFT, ipady=3, ipadx=4)
+
+        # Delay
+        df = self._card(f, "⏱ Độ trễ giữa các prompt")
+        df.pack(fill=X, padx=12, pady=4)
+        df_r = Frame(df, bg=CARD); df_r.pack(anchor=W, padx=8, pady=4)
+        self.cv_delay = StringVar(value="normal")
+        for txt, val in [("Bình thường (5s)", "normal"),
+                          ("Gấp đôi (10s)", "double"),
+                          ("Ngẫu nhiên (6-15s)", "random")]:
+            Radiobutton(df_r, text=txt, variable=self.cv_delay, value=val,
+                        bg=CARD, fg=TEXT, selectcolor=BG,
+                        activebackground=CARD, font=("Segoe UI", 9)
+                        ).pack(side=LEFT, padx=8)
+
+        # Timeout chờ video + tải tự động
+        tf = self._card(f, "⬇️ Chờ video xong → Tự động tải (thoát sớm khi xong)")
+        tf.pack(fill=X, padx=12, pady=4)
+        self.cv_timeout = StringVar(value="600")
+        cv_opts = [
+            ("TỰ ĐỘNG — Chờ đến khi xong (tối đa 10 phút)  ⬇️  Tải ngay", "600"),
+            ("Tối đa 5 phút  ⬇️  Tải ngay khi xong", "300"),
+            ("Tối đa 3 phút  ⬇️  Tải ngay khi xong", "180"),
+            ("30 giây  (submit nhanh, không tải về)", "30"),
+        ]
+        for txt, val in cv_opts:
+            Radiobutton(tf, text=txt, variable=self.cv_timeout, value=val,
+                        bg=CARD, fg=TEXT, selectcolor=BG,
+                        activebackground=CARD, font=("Segoe UI", 9)
+                        ).pack(anchor=W, padx=12)
+        Label(tf, text="  ℹ️  Tool thoát ngay khi video xong!",
+              font=("Segoe UI", 8), bg=CARD, fg=MUTED).pack(anchor=W, padx=20, pady=(0,4))
+
+        self.cv_progress = ttk.Progressbar(f, mode="indeterminate", style="TProgressbar")
+        self.cv_progress.pack(fill=X, padx=12, pady=(6,2))
+        self.cv_status_lbl = Label(f, text="", font=("Segoe UI", 8), bg=BG, fg=MUTED)
+        self.cv_status_lbl.pack()
+
+        btn_f = Frame(f, bg=BG); btn_f.pack(fill=X, padx=12, pady=8)
+        self._btn(btn_f, "  ▶  START — Tạo video + Tự động tải",
+                  self._start_create_video, color=GREEN
+                  ).pack(side=LEFT, fill=X, expand=True, ipady=9, padx=(0,4))
+        self._btn(btn_f, "🧪 TEST: Chỉ chọn ảnh (không submit)",
+                  self._test_char_select, color="#1B4721"
+                  ).pack(side=LEFT, ipady=9, padx=(0,4))
+        self._btn(btn_f, "⏹ STOP", self._stop, color=RED
+                  ).pack(side=LEFT, ipady=9, ipadx=6)
+
+        # Cập nhật hiển thị nhân vật khi chuyển tab
+        self.nb.bind("<<NotebookTabChanged>>", self._on_tab_change)
+
+    def _refresh_char_display(self):    def _refresh_char_display(self):
+        """Cập nhật label nhân vật trong Create Video tab"""
+        if self.characters:
+            names = ", ".join(self.characters.keys())
+            self.cv_char_display.config(
+                text=f"✅ {len(self.characters)} nhân vật: {names}\n"
+                     f"   → TẤT CẢ ảnh sẽ được upload vào mỗi video",
+                fg="green"
+            )
+        else:
+            self.cv_char_display.config(
+                text="Chưa có nhân vật. Setup trong tab 'Character Setup' trước.", fg="gray"
+            )
+
+    def _on_tab_change(self, evt):
+        idx = self.nb.index(self.nb.select())
+        if idx == 4:  # Create Video tab
+            self._refresh_char_display()
+
+    def _start_create_video(self):
+        raw = self.cv_prompts.get("1.0", END).strip()
+        prompts = [l.strip() for l in raw.splitlines() if l.strip() and not l.startswith("#")]
+        if not prompts:
+            messagebox.showerror("Lỗi", "Chưa nhập prompt!")
+            return
+        if not self.bc.is_alive():
+            messagebox.showerror("Lỗi", "Chưa mở Chrome!")
+            return
+        out_dir = self.cv_out.get()
+        os.makedirs(out_dir, exist_ok=True)
+        self.log(f"🚀 Create Video: {len(prompts)} prompt(s), {len(self.characters)} nhân vật")
+        self.nb.select(5)
+        self._run_bg(lambda: self._create_video_worker(prompts, out_dir))
+
+    def _create_video_worker(self, prompts, out_dir):
+        self.running = True
+        self.root.after(0, self.cv_progress.start)
+        import random
+        delay_map = {"normal": 5, "double": 10, "random": None}
+        chars = list(self.characters.items())  # [(name, path), ...]
+        try:
+            for i, prompt in enumerate(prompts, 1):
+                if not self.running: break
+                self.log(f"\n── [{i}/{len(prompts)}] {prompt[:60]}...")
+
+                # Detect nhân vật trong prompt
+                detected = [(n, p) for n, p in chars if n.lower() in prompt.lower()]
+                # Nếu detect được thì dùng detected, ngược lại upload TẤT CẢ nhân vật
+                to_upload = detected if detected else chars
+                if to_upload:
+                    self.log(f"   👤 Nhân vật: {[n for n,_ in to_upload]} ({'detect' if detected else 'tất cả'})")
+
+                ok = self.bc.new_project()
+                if not ok: continue
+                time.sleep(2)
+
+                # Upload ảnh nhân vật trước khi nhập prompt
+                for name, img_path in to_upload:
+                    self.log(f"   📤 Upload ảnh {name}...")
+                    self.bc.upload_image(img_path)
+                    time.sleep(0.5)
+
+                # Đóng panel media nếu đang mở (nhấn Escape)
+                try:
+                    from selenium.webdriver.common.keys import Keys
+                    self.bc.driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.ESCAPE)
+                    time.sleep(0.5)
+                except: pass
+
+                ok = self.bc.set_prompt(prompt)
+                if not ok: continue
+                time.sleep(1)
+
+                ok = self.bc.click_generate()
+                if not ok: continue
+
+                ok = self.bc.wait_for_video(timeout=int(self.cv_timeout.get()))
+                fname = f"{self.cv_base.get()}_{i:02d}.mp4"
+                if ok:
+                    self.log(f"   ⬇️ Tải về: {fname}")
+                    self.root.after(0, lambda fi=fname: self.cv_status_lbl.config(
+                        text=f"⬇️ Đang tải {fi}..."))
+                    self.bc.click_download(out_dir, fname)
+                    self.root.after(0, lambda fi=fname: self.cv_status_lbl.config(
+                        text=f"✅ Tải xong: {fi}"))
+                else:
+                    self.log(f"   ⏭ Bỏ qua tải — hết timeout ({self.cv_timeout.get()}s)")
+
+                d = delay_map.get(self.cv_delay.get(), 5)
+                d = d if d else random.randint(6, 15)
+                self.log(f"⏳ Chờ {d}s rồi sang prompt tiếp...")
+                time.sleep(d)
+        finally:
+            self.running = False
+            self.root.after(0, self.cv_progress.stop)
+            self.root.after(0, lambda: self.cv_status_lbl.config(text=""))
+            self.log(f"\n✅ Hoàn tất Create Video! Video đã lưu tại:\n   {out_dir}")
+
+    def _test_char_select(self):
+        """Test: chỉ upload ảnh, không generate"""
+        if not self.characters:
+            messagebox.showinfo("Test", "Chưa có nhân vật trong Character Setup!")
+            return
+        raw = self.cv_prompts.get("1.0", END)
+        for name, path in self.characters.items():
+            if name.lower() in raw.lower():
+                self.log(f"🧪 TEST: Sẽ upload ảnh '{name}' từ {path}")
+        messagebox.showinfo("Test OK", f"Detect {len(self.characters)} nhân vật. Xem log để biết chi tiết.")
+
+    # ── TAB 6: Logs ──────────────────────────────────────
+    def _tab_logs(self):
+        f = Frame(self.nb, bg=BG)
+        self.nb.add(f, text="📋  Logs")
+
+        btn_f = Frame(f, bg=BG); btn_f.pack(fill=X, padx=10, pady=6)
+        self._btn(btn_f, "🗑 Xóa log", lambda: (
+            self.log_text.config(state=NORMAL),
+            self.log_text.delete("1.0", END),
+            self.log_text.config(state=DISABLED)
+        ), color="#21262D").pack(side=LEFT, ipady=5, padx=(0,4))
+        self._btn(btn_f, "⏹ Dừng tiến trình",
+                  lambda: setattr(self, "running", False),
+                  color=RED).pack(side=LEFT, ipady=5, padx=(0,4))
+        self._btn(btn_f, "💾 Lưu log ra file TXT",
+                  self._save_log, color="#21262D").pack(side=LEFT, ipady=5)
+
+        self.log_text = scrolledtext.ScrolledText(
+            f, font=("Consolas", 9), state=DISABLED,
+            bg="#0D1117", fg="#C9D1D9",
+            insertbackground=TEXT, relief="flat",
+            selectbackground=ACCENT)
+        self.log_text.pack(fill=BOTH, expand=True, padx=10, pady=(0,10))
+
+    def _save_log(self):    def _save_log(self):
+        p = filedialog.asksaveasfilename(defaultextension=".txt",
+                                          filetypes=[("Text", "*.txt")])
+        if p:
+            self.log_text.config(state=NORMAL)
+            content = self.log_text.get("1.0", END)
+            self.log_text.config(state=DISABLED)
+            Path(p).write_text(content, encoding="utf-8")
+            self.log(f"✅ Đã lưu log: {p}")
+
+    # ── TAB 7: Ghép Video ───────────────────────────────
+    def _tab_merge(self):
+        f = Frame(self.nb, bg=BG)
+        self.nb.add(f, text="🎬  Ghép Video")
+
+        hf = Frame(f, bg="#0A0F1A"); hf.pack(fill=X)
+        Label(hf, text="🎬  Ghép nhiều video thành 1 file",
+              font=("Segoe UI", 12, "bold"), bg="#0A0F1A", fg=ACCENT
+              ).pack(anchor=W, padx=16, pady=10)
+        Label(hf, text="Yêu cầu: FFmpeg đã cài trong PATH  |  Tải tại: ffmpeg.org",
+              font=("Segoe UI", 9), bg="#0A0F1A", fg=MUTED).pack(anchor=W, padx=16, pady=(0,10))
+
+        info = self._card(f, "ℹ️ Thông tin công cụ")
+        info.pack(fill=X, padx=12, pady=(10,5))
+        Label(info, text=(
+            "• Ghép các file MP4 trong một thư mục thành 1 video duy nhất
+"
+            "• Sắp xếp theo tên file (video_01, video_02, ...)
+"
+            "• Sử dụng FFmpeg concat — giữ nguyên chất lượng gốc (không re-encode)"
+        ), bg=CARD, fg=TEXT, font=("Segoe UI", 9), justify=LEFT).pack(anchor=W, padx=10, pady=8)
+
+        self._btn(f, "  ▶  MỞ CÔNG CỤ GHÉP VIDEO",
+                  self._open_merger_window, color=GREEN
+                  ).pack(pady=16, ipady=10, ipadx=30)
+
+    def _open_merger_window(self):    def _open_merger_window(self):
+        win = Toplevel(self.root)
+        win.title("Video Merger Tool")
+        win.geometry("560x480")
+        win.resizable(False, False)
+        win.configure(bg=BG)
+
+        Label(win, text="🎬 GHÉP VIDEO TOOL", bg=BG, fg=ACCENT, font=("Segoe UI", 13, "bold")).pack(pady=10)
+
+        # Chọn folder
+        f1 = LabelFrame(win, text="Chọn Folder Chứa Video", padx=8, pady=5)
+        f1.pack(fill=X, padx=15, pady=6)
+        folder_var = StringVar()
+        fr = Frame(f1); fr.pack(fill=X)
+        Entry(fr, textvariable=folder_var, width=40).pack(side=LEFT, padx=4)
+        def browse_folder():
+            d = filedialog.askdirectory()
+            if d:
+                folder_var.set(d)
+                vids = sorted(Path(d).glob("*.mp4"))
+                vid_list.config(state=NORMAL)
+                vid_list.delete("1.0", END)
+                for v in vids:
+                    vid_list.insert(END, f"{v.name}\n")
+                vid_list.config(state=DISABLED)
+        Button(fr, text="Chọn Folder", bg=ACCENT, fg="white",
+               command=browse_folder).pack(side=LEFT)
+
+        # Danh sách video
+        f2 = LabelFrame(win, text="Danh Sách Video", padx=8, pady=5)
+        f2.pack(fill=BOTH, expand=True, padx=15, pady=4)
+        vid_list = scrolledtext.ScrolledText(f2, height=8, font=("Consolas", 9), state=DISABLED)
+        vid_list.pack(fill=BOTH, expand=True)
+
+        # Output
+        f3 = LabelFrame(win, text="Nơi Lưu File & Tên Output", padx=8, pady=5)
+        f3.pack(fill=X, padx=15, pady=4)
+        r = Frame(f3); r.pack(fill=X)
+        Label(r, text="Lưu vào:").pack(side=LEFT)
+        out_dir_var = StringVar()
+        Entry(r, textvariable=out_dir_var, width=36).pack(side=LEFT, padx=4)
+        Button(r, text="Chọn", command=lambda: out_dir_var.set(filedialog.askdirectory() or out_dir_var.get())
+               ).pack(side=LEFT, bg=ACCENT, fg="white")
+        r2 = Frame(f3); r2.pack(fill=X, pady=3)
+        Label(r2, text="Tên file:").pack(side=LEFT)
+        fname_var = StringVar(value="video_ghep.mp4")
+        Entry(r2, textvariable=fname_var, width=30).pack(side=LEFT, padx=4)
+
+        # Progress
+        m_prog = ttk.Progressbar(win, mode="indeterminate")
+        m_prog.pack(fill=X, padx=15, pady=4)
+        m_status = Label(win, text="Vui lòng chọn folder chứa video")
+        m_status.pack()
+
+        def do_merge():
+            folder = folder_var.get()
+            if not folder:
+                messagebox.showerror("Lỗi", "Chưa chọn folder!")
+                return
+            out_d = out_dir_var.get() or folder
+            fname = fname_var.get() or "video_ghep.mp4"
+            out_path = str(Path(out_d) / fname)
+
+            vids = sorted(Path(folder).glob("*.mp4"))
+            if not vids:
+                messagebox.showerror("Lỗi", "Không có file MP4 trong folder!")
+                return
+
+            list_file = str(Path(folder) / "_merge_list.txt")
+            with open(list_file, "w", encoding="utf-8") as lf:
+                for v in vids:
+                    lf.write(f"file '{v}'\n")
+
+            m_prog.start()
+            m_status.config(text=f"Đang ghép {len(vids)} video...")
+
+            def run():
+                try:
+                    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                           "-i", list_file, "-c", "copy", out_path]
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                    if res.returncode == 0:
+                        win.after(0, lambda: m_prog.stop())
+                        win.after(0, lambda: m_status.config(text=f"✅ Xong! → {out_path}"))
+                        win.after(0, lambda: messagebox.showinfo("✅ Done", f"Ghép xong!\n{out_path}"))
+                    else:
+                        err = res.stderr[:500]
+                        win.after(0, lambda: m_prog.stop())
+                        win.after(0, lambda: m_status.config(text="❌ Lỗi FFmpeg"))
+                        win.after(0, lambda: messagebox.showerror("Lỗi", f"FFmpeg error:\n{err}"))
+                except FileNotFoundError:
+                    win.after(0, lambda: m_prog.stop())
+                    win.after(0, lambda: m_status.config(text="❌ FFmpeg không có trong PATH"))
+                    win.after(0, lambda: messagebox.showerror("Lỗi", "FFmpeg chưa được cài!\nTải tại: https://ffmpeg.org"))
+                except Exception as e:
+                    _e = str(e)
+                    win.after(0, lambda: m_prog.stop())
+                    win.after(0, lambda: m_status.config(text=f"❌ {_e}"))
+            threading.Thread(target=run, daemon=True).start()
+
+        Button(win, text="▶ GHÉP VIDEO", bg=GREEN, fg="white",
+               font=("Segoe UI", 11, "bold"), command=do_merge
+               ).pack(fill=X, padx=15, pady=8, ipady=8)
+
+    # ─── HELPERS ────────────────────────────
+    def _browse(self, entry_widget):
+        d = filedialog.askdirectory()
+        if d:
+            entry_widget.delete(0, END)
+            entry_widget.insert(0, d)
+
+    def _run_bg(self, fn):
+        """Chạy fn trong background thread, bảo vệ double-start"""
+        if self.running:
+            self.log("⚠ Đang chạy rồi — chờ hoàn tất trước!")
+            return
+        threading.Thread(target=fn, daemon=True).start()
+
+
+# ═══════════════════════════════════════
+# ENTRY POINT
+# ═══════════════════════════════════════
+if __name__ == "__main__":
+    # Cài dependencies nếu thiếu
+    if not HAS_SELENIUM:
+        print("📦 Cài selenium + webdriver-manager...")
+        os.system("pip install selenium webdriver-manager -q")
+        print("✅ Xong! Vui lòng chạy lại.")
+        sys.exit(0)
+
+    root = Tk()
+    app = VeoApp(root)
+    root.protocol("WM_DELETE_WINDOW", root.quit)
+    root.mainloop()
