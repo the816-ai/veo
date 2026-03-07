@@ -2,6 +2,7 @@
 Veo 3 Flow Automation Tool
 Tự động hóa Google Flow để tạo video Veo 3
 """
+import json
 import os, sys, time, json, threading, subprocess, shutil, re
 from pathlib import Path
 from tkinter import *
@@ -2250,6 +2251,25 @@ class VeoApp:
         self.nb.add(outer, text="🌐  Kết Nối")
 
         # Hướng dẫn nhanh
+        # ── Trạng thái đăng nhập (hiển thị ngay đầu tab) ──
+        status_bar = Frame(f, bg="#0D1B2A", pady=6)
+        status_bar.pack(fill=X, padx=14, pady=(10, 0))
+        cfg = self._load_config()
+        _init_text = ("🟢 Session đã lưu — tự động kết nối khi khởi động"
+                      if cfg.get("logged_in") else "⚪ Chưa đăng nhập lần nào")
+        _init_color = GREEN if cfg.get("logged_in") else MUTED
+        self.login_status_lbl = Label(
+            status_bar, text=_init_text, fg=_init_color,
+            font=("Segoe UI", 10, "bold"), bg="#0D1B2A")
+        self.login_status_lbl.pack(side=LEFT, padx=12)
+
+        def _clear_session():
+            self._save_config("logged_in", False)
+            self._update_login_indicator("none")
+            self.log("Đã xóa session — lần sau phải đăng nhập lại.")
+        self._btn(status_bar, "Xoa session", _clear_session,
+                  color="#6E2424").pack(side=RIGHT, padx=12, ipady=4)
+
         top = self._card(f, "📋 Quy trình kết nối")
         top.pack(fill=X, padx=14, pady=(12, 5))
         Label(top, text=(
