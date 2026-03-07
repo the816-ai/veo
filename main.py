@@ -1832,188 +1832,248 @@ class VeoApp:
 
     def _img_batch_run(self, prompts, count, orient, delay, timeout, out_dir):
         """
-        Pipeline batch:
-        - Main loop: d\u00e1n prompt li\u00ean t\u1ee5c, ch\u1ec9 \u0111\u1ee3i ~delay gi\u00e2y gi\u1eefa m\u1ed7i prompt
-        - Watcher thread: c\u1ee9 2s scan browser, t\u1ef1 download \u1ea3nh m\u1edbi xu\u1ea5t hi\u1ec7n
+        Tạo ảnh Nano Banana 2 trên Google Flow — pipeline tuần tự.
+        Mỗi prompt: nhập → generate → chờ ảnh → tải về → 10s → prompt tiếp.
         """
         os.makedirs(out_dir, exist_ok=True)
         total = len(prompts)
-        done_prompts = [0]
-        img_serial  = [1]
-        seen_srcs   = set()   # \u0111\u00e3 download ho\u1eb7c \u0111\u00e3 g\u1eb7p
+        img_serial = [1]
 
-        # \u2500\u2500 WATCHER THREAD \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-        watcher_alive = [True]
-
-        def _watcher():
-            import urllib.request as _ur
-            while watcher_alive[0]:
-                time.sleep(2)
-                drv2 = self.bc.driver
-                if not drv2:
-                    continue
-                try:
-                    imgs = drv2.find_elements(By.XPATH,
-                        "//img["
-                        "contains(@src,'generativelanguage') or "
-                        "contains(@src,'usercontent') or "
-                        "contains(@src,'data:image') or "
-                        "contains(@src,'blob:')]"
-                    )
-                    for im in imgs:
-                        src = im.get_attribute("src") or ""
-                        if not src or src in seen_srcs:
-                            continue
-                        seen_srcs.add(src)
-                        if src.startswith("blob:"):
-                            self.log(f"   \u26a0 blob URL \u2014 c\u1ea7n t\u1ea3i tay t\u1eeb browser")
-                            continue
-                        try:
-                            fname = os.path.join(
-                                out_dir, f"img_{img_serial[0]:04d}.jpg")
-                            _ur.urlretrieve(src, fname)
-                            self.log(f"   \ud83d\udcbe \u0110\u00e3 t\u1ea3i: img_{img_serial[0]:04d}.jpg")
-                            img_serial[0] += 1
-                        except Exception as e:
-                            self.log(f"   \u274c L\u01b0u l\u1ed7i: {e}")
-                except Exception:
-                    pass
-
-        watcher_thread = threading.Thread(target=_watcher, daemon=True)
-        watcher_thread.start()
-
-        # \u2500\u2500 MAIN LOOP: D\u00e1n prompt li\u00ean t\u1ee5c \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         drv = self.bc.driver
         if not drv:
-            self.log("\u274c Kh\u00f4ng c\u00f3 browser!")
-            watcher_alive[0] = False
+            self.log("Khong co browser! Vao tab Ket Noi -> Mo Chrome truoc.")
             self._bq_running = False
             return
 
-        # M\u1edf Flow m\u1ed9t l\u1ea7n duy nh\u1ea5t
-        self.log("\ud83c\udf0f M\u1edf Flow...")
-        drv.get(FLOW_URL)
-        time.sleep(3)
+        # ── 1. Mở Flow ──────────────────────────────────────────────────────
+        self.log("Mo Google Flow Image...")
+        drv.get("https://labs.google/fx/vi/tools/image-fx")
+        time.sleep(4)
 
-        # Click Image tab m\u1ed9t l\u1ea7n
-        try:
-            tab = WebDriverWait(drv, 12).until(
-                EC.element_to_be_clickable((By.XPATH,
-                    "//button[contains(.,'Image') or contains(.,'H\u00ecnh \u1ea3nh')]"))
-            )
-            drv.execute_script("arguments[0].click();", tab)
-            time.sleep(1)
-            self.log("\u2705 Tab Image")
-        except: pass
+        # ── 2. Chọn hướng (Ngang/Dọc) ───────────────────────────────────────
+        orient_labels = (["Ngang", "Landscape", "16:9"] if orient == "ngang"
+                         else ["Doc", "Portrait", "9:16"])
+        for lbl in orient_labels:
+            try:
+                btn = drv.find_element(By.XPATH,
+                    f"//button[contains(.,'{lbl}') or @aria-label='{lbl}']")
+                drv.execute_script("arguments[0].click();", btn)
+                time.sleep(0.5)
+                self.log(f"Huong: {lbl}")
+                break
+            except: continue
 
-        # Ch\u1ecdn h\u01b0\u1edbng m\u1ed9t l\u1ea7n
-        orient_text = "Ngang" if orient == "ngang" else "D\u1ecdc"
-        try:
-            ob = drv.find_element(By.XPATH,
-                f"//button[contains(.,'{orient_text}') or "
-                f"contains(.,'Landscape') or contains(.,'Portrait')]")
-            drv.execute_script("arguments[0].click();", ob)
-            time.sleep(0.4)
-        except: pass
+        # ── 3. Chọn số ảnh (x1~x4) ─────────────────────────────────────────
+        for xsel in [f"x{count}", str(count), f"{count}"]:
+            try:
+                btn = drv.find_element(By.XPATH,
+                    f"//button[normalize-space(.)='{xsel}' or @aria-label='{xsel}']")
+                drv.execute_script("arguments[0].click();", btn)
+                time.sleep(0.4)
+                self.log(f"So anh: x{count}")
+                break
+            except: continue
 
-        # Ch\u1ecdn s\u1ed1 l\u01b0\u1ee3ng m\u1ed9t l\u1ea7n
-        try:
-            cb = drv.find_element(By.XPATH,
-                f"//button[normalize-space(.)='x{count}']")
-            drv.execute_script("arguments[0].click();", cb)
-            time.sleep(0.4)
-        except: pass
-
-        # V\u00f2ng l\u1eb7p d\u00e1n t\u1eebng prompt
+        # ── 4. Vòng lặp từng prompt ─────────────────────────────────────────
         for idx, prompt in enumerate(prompts):
             if not self._bq_running:
                 break
 
-            self.root.after(0, lambda i=idx, p=prompt: self.bq_status.config(
-                text=f"\ud83d\ude80 [{i+1}/{total}] D\u00e1n: {p[:60]}...",
-                fg=ORANGE
-            ))
-            self.log(f"\n\ud83c\udfa8 [{idx+1}/{total}] {prompt[:80]}")
+            self.log(f"\nPROMPT [{idx+1}/{total}]:\n  {prompt[:100]}")
+            self.root.after(0, lambda i=idx, t=total:
+                self.bq_status.config(
+                    text=f"Prompt [{i+1}/{t}] — dang nhap va generate...",
+                    fg=ORANGE))
 
-            try:
-                # Nh\u1eadp prompt v\u00e0o textarea
-                ta = WebDriverWait(drv, 10).until(
-                    EC.presence_of_element_located((By.XPATH,
-                        "//textarea | //div[@contenteditable='true']"))
-                )
-                # X\u00f3a s\u1ea1ch v\u00e0 g\u00f5 m\u1edbi
-                drv.execute_script(
-                    "arguments[0].value=''; "
-                    "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));",
-                    ta
-                )
-                time.sleep(0.2)
-                ta.click()
-                ta.send_keys(prompt)
-                time.sleep(0.4)
-
-                # Click Generate
+            # ── 4a. Tìm + nhập prompt vào ô input ──────────────────────────
+            input_ok = False
+            # Thử nhiều selector theo thứ tự ưu tiên
+            input_selectors = [
+                # textarea rõ ràng nhất
+                (By.CSS_SELECTOR, "textarea"),
+                # contenteditable với role
+                (By.CSS_SELECTOR, "div[contenteditable='true'][role='textbox']"),
+                (By.CSS_SELECTOR, "div[contenteditable='true']"),
+                # placeholder gợi ý cho image
+                (By.XPATH, "//*[@placeholder[contains(.,'describe') or "
+                            "contains(.,'mo ta') or contains(.,'Mô tả')]]"),
+            ]
+            ta = None
+            for by, sel in input_selectors:
                 try:
-                    gb = WebDriverWait(drv, 8).until(
-                        EC.element_to_be_clickable((By.XPATH,
-                            "//button[@aria-label='Generate' or @aria-label='T\u1ea1o' "
-                            "or contains(@class,'generate')]"))
-                    )
+                    el = WebDriverWait(drv, 6).until(
+                        EC.presence_of_element_located((by, sel)))
+                    if el and el.is_displayed():
+                        ta = el
+                        break
+                except: continue
+
+            if ta:
+                try:
+                    # Xóa sạch bằng JS rồi dispatch input event
+                    drv.execute_script("""
+                        var el = arguments[0];
+                        el.focus();
+                        document.execCommand('selectAll', false, null);
+                        document.execCommand('delete', false, null);
+                    """, ta)
+                    time.sleep(0.2)
+                    ta.send_keys(prompt)
+                    time.sleep(0.5)
+                    input_ok = True
+                    self.log("  Da nhap prompt")
+                except Exception as e:
+                    self.log(f"  Loi nhap prompt: {e}")
+            else:
+                self.log("  Khong tim thay o nhap prompt!")
+
+            if not input_ok:
+                self.log(f"  Bo qua prompt {idx+1}")
+                continue
+
+            # ── 4b. Click Generate (nhiều selector) ─────────────────────────
+            gen_selectors = [
+                (By.XPATH, "//button[@aria-label='Generate']"),
+                (By.XPATH, "//button[@aria-label='Tao' or @aria-label='Tạo']"),
+                (By.XPATH, "//button[contains(@class,'generate')]"),
+                (By.XPATH, "//button[.//mat-icon[contains(.,'arrow_forward') or contains(.,'send')]]"),
+                (By.XPATH, "//button[.//span[normalize-space()='arrow_forward' or normalize-space()='send']]"),
+            ]
+            generated = False
+            for by, sel in gen_selectors:
+                try:
+                    gb = WebDriverWait(drv, 5).until(EC.element_to_be_clickable((by, sel)))
                     drv.execute_script("arguments[0].click();", gb)
-                    self.log(f"   \u2705 \u0110\u00e3 g\u1eedi generate")
-                except:
+                    self.log("  Da click Generate!")
+                    generated = True
+                    break
+                except: continue
+
+            if not generated:
+                # Fallback: nhấn Enter trong textarea
+                try:
                     ta.send_keys("\n")
-                    self.log(f"   \u2705 G\u1eedi qua Enter")
+                    self.log("  Gui qua Enter (fallback)")
+                    generated = True
+                except: pass
 
-            except Exception as e:
-                self.log(f"   \u274c L\u1ed7i: {e}")
+            if not generated:
+                self.log("  THAT BAI: khong the click Generate")
+                continue
 
-            done_prompts[0] += 1
-            self.root.after(0, lambda d=done_prompts[0]:
+            # ── 4c. Chờ ảnh render xong ─────────────────────────────────────
+            self.log(f"  Cho anh render (toi da {timeout}s)...")
+            t_start = time.time()
+            imgs_found = []
+            before_count = len(drv.find_elements(By.XPATH,
+                "//img[contains(@src,'generativelanguage') or "
+                "contains(@src,'usercontent') or contains(@src,'aiusercontent')]"))
+
+            while time.time() - t_start < timeout:
+                time.sleep(2)
+                try:
+                    all_imgs = drv.find_elements(By.XPATH,
+                        "//img[contains(@src,'generativelanguage') or "
+                        "contains(@src,'usercontent') or contains(@src,'aiusercontent')]")
+                    if len(all_imgs) > before_count:
+                        new_imgs = all_imgs[before_count:]
+                        imgs_found = [im.get_attribute("src") for im in new_imgs
+                                      if im.get_attribute("src")]
+                        self.log(f"  Tim thay {len(imgs_found)} anh moi!")
+                        break
+                    # Thử tìm ảnh blob (đôi khi Flow dùng blob URL)
+                    blob_imgs = drv.find_elements(By.XPATH,
+                        "//img[contains(@src,'blob:')]")
+                    if len(blob_imgs) > 0:
+                        self.log(f"  Tim thay {len(blob_imgs)} anh (blob URL)")
+                        imgs_found = ["blob"] * len(blob_imgs)
+                        break
+                except: pass
+
+            # ── 4d. Tải ảnh về (dùng CDP screenshotter hoặc JS canvas) ──────
+            if imgs_found and imgs_found[0] != "blob":
+                # Ảnh có URL thật → tải bằng JS fetch với cookie
+                for aidx, img_url in enumerate(imgs_found[:count]):
+                    try:
+                        fname = os.path.join(out_dir, f"img_{img_serial[0]:04d}.jpg")
+                        # Dùng JS fetch (có cookie, bypass 403)
+                        b64 = drv.execute_script("""
+                            var url = arguments[0];
+                            var xhr = new XMLHttpRequest();
+                            xhr.open('GET', url, false);
+                            xhr.responseType = 'arraybuffer';
+                            xhr.send();
+                            if (xhr.status !== 200) return null;
+                            var arr = new Uint8Array(xhr.response);
+                            var bin = '';
+                            for (var i = 0; i < arr.length; i++)
+                                bin += String.fromCharCode(arr[i]);
+                            return btoa(bin);
+                        """, img_url)
+                        if b64:
+                            import base64
+                            with open(fname, 'wb') as f_out:
+                                f_out.write(base64.b64decode(b64))
+                            sz = os.path.getsize(fname)/1024
+                            self.log(f"  Da luu: img_{img_serial[0]:04d}.jpg ({sz:.0f} KB)")
+                            img_serial[0] += 1
+                        else:
+                            self.log(f"  Loi: JS fetch tra ve null (co the bi auth)")
+                    except Exception as e:
+                        self.log(f"  Loi tai anh: {e}")
+            elif imgs_found:
+                # Blob URL → dùng CDP screenshot từng ảnh element
+                try:
+                    img_elements = drv.find_elements(By.XPATH,
+                        "//img[contains(@src,'blob:')]")
+                    for im_el in img_elements[:count]:
+                        fname = os.path.join(out_dir, f"img_{img_serial[0]:04d}.png")
+                        b64 = drv.execute_script("""
+                            var img = arguments[0];
+                            var c = document.createElement('canvas');
+                            c.width = img.naturalWidth;
+                            c.height = img.naturalHeight;
+                            c.getContext('2d').drawImage(img, 0, 0);
+                            return c.toDataURL('image/jpeg', 0.95).split(',')[1];
+                        """, im_el)
+                        if b64:
+                            import base64
+                            fname = fname.replace('.png', '.jpg')
+                            with open(fname, 'wb') as f_out:
+                                f_out.write(base64.b64decode(b64))
+                            sz = os.path.getsize(fname)/1024
+                            self.log(f"  Da luu canvas: img_{img_serial[0]:04d}.jpg ({sz:.0f} KB)")
+                            img_serial[0] += 1
+                except Exception as e:
+                    self.log(f"  Loi canvas capture: {e}")
+            else:
+                self.log(f"  TIMEOUT: Khong tim thay anh sau {timeout}s")
+
+            self.root.after(0, lambda d=idx+1:
                 self.bq_progress.configure(value=d))
 
-            # Ch\u1edd ng\u1eafn r\u1ed3i d\u00e1n prompt ti\u1ebfp
+            # ── 4e. Chờ trước prompt tiếp ───────────────────────────────────
             if idx < total - 1 and self._bq_running:
-                self.log(f"   \u23f3 Ch\u1edd {delay:.0f}s r\u1ed3i d\u00e1n prompt ti\u1ebfp...")
-                # Chờ delay giây, từng giây 1 để có thể dừng nhanh
                 wait_s = int(delay)
+                self.log(f"  Cho {wait_s}s roi tiep prompt {idx+2}...")
                 for _w in range(wait_s):
                     if not self._bq_running: break
                     self.root.after(0, lambda r=wait_s-_w:
                         self.bq_status.config(
-                            text=f"Cho {r}s roi dan prompt tiep..."
-                        ))
+                            text=f"Cho {r}s roi dan prompt tiep..."))
                     time.sleep(1)
 
-        # \u0110\u00e3 d\u00e1n h\u1ebft prompts. \u0110\u1ee3i watcher b\u1eaft \u1ea3nh cu\u1ed1i c\u00f9ng
-        if self._bq_running:
-            self.log(f"\n\u23f3 \u0110\u00e3 d\u00e1n {total} prompts. Ch\u1edd watcher b\u1eaft \u1ea3nh cu\u1ed1i (60s)...")
-            self.root.after(0, lambda: self.bq_status.config(
-                text=f"\u23f3 \u0110\u00e3 d\u00e1n xong {total} prompts. Watcher \u0111ang ch\u1edd \u1ea3nh render...",
-                fg=ORANGE
-            ))
-            for _ in range(60):
-                if not self._bq_running:
-                    break
-                time.sleep(1)
-
-        # D\u1eebng watcher
-        watcher_alive[0] = False
+        # ── 5. Xong ─────────────────────────────────────────────────────────
+        done = img_serial[0] - 1
         self._bq_running = False
-
-        dl_count = img_serial[0] - 1
         self.root.after(0, lambda: [
-            self.bq_start_btn.config(state=NORMAL,
-                text="  \u25b6\ufe0f  B\u1eaft \u0111\u1ea7u Batch T\u1ea1o \u1ea3nh  "),
+            self.bq_start_btn.config(state=NORMAL, text="  Bat dau Tao anh  "),
             self.bq_status.config(
-                text=f"\u2705 Xong! {total} prompts d\u00e1n. "
-                     f"\u0110\u00e3 download {dl_count} \u1ea3nh \u2192 {out_dir}",
-                fg=GREEN
-            )
+                text=f"Xong! {total} prompts. Da tai {done} anh -> {out_dir}",
+                fg=GREEN),
+            self.bq_progress.configure(value=total),
         ])
-        self.log(f"\n\ud83c\udf89 Batch xong! D\u00e1n {total} prompts, download {dl_count} \u1ea3nh.")
-        self.log(f"\ud83d\udcc1 \u1ea2nh l\u01b0u: {out_dir}")
-
+        self.log(f"\nBATCH XONG! Tong: {done} anh da tai ve {out_dir}")
 
     def _gm_build_prompt(self):
         """Xây dựng system prompt cho Gemini."""
