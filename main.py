@@ -157,7 +157,6 @@ class BrowserController:
             f"--user-data-dir={veo_profile}",
             "--no-first-run",
             "--no-default-browser-check",
-            "--disable-blink-features=AutomationControlled",
             "--start-maximized",
         ]
         if mode == "incognito":
