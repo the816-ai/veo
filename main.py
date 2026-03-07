@@ -147,53 +147,60 @@ class BrowserController:
         os.makedirs(dl_dir, exist_ok=True)
         self._download_dir = dl_dir
 
-        # Profile riêng cho tool — tránh conflict với Chrome đang mở
-        veo_profile = os.path.join(
-            os.path.expanduser("~"), "AppData", "Local",
-            "Google", "Chrome", "VEO3_Profile"
+        # Dung profile Default THAT cua user (co day du auth token cho Google AI API)
+        # VEO3_Profile rieng biet se khong co token -> 403 Forbidden khi goi video API
+        chrome_data_dir = os.path.join(
+            os.environ.get('LOCALAPPDATA', os.path.expanduser('~')),
+            'Google', 'Chrome', 'User Data'
         )
-        os.makedirs(veo_profile, exist_ok=True)
+        profile_dir = 'Default'  # Dung profile chinh cua user
 
-        # Build Chrome command
-        cmd = [chrome_exe]
-        cmd += [
+        # Neu Chrome dang chay voi port 9222 -> ket noi luon khong can restart
+        if self._is_port_open(9222):
+            self.log("Port 9222 dang mo - ket noi vao Chrome hien tai...")
+            return self.connect_existing()
+
+        # Kill Chrome cu de tranh conflict profile (khong the chay 2 Chrome cung profile)
+        self.log("Dong Chrome cu (neu co)...")
+        try:
+            subprocess.run(["taskkill", "/f", "/im", "chrome.exe"],
+                          capture_output=True, timeout=5)
+            time.sleep(2)
+        except: pass
+
+        # Build Chrome command voi Default profile
+        cmd = [chrome_exe,
             "--remote-debugging-port=9222",
-            f"--user-data-dir={veo_profile}",
+            f"--user-data-dir={chrome_data_dir}",
+            f"--profile-directory={profile_dir}",
             "--no-first-run",
             "--no-default-browser-check",
             "--start-maximized",
         ]
         if mode == "incognito":
             cmd.append("--incognito")
+        cmd.append(FLOW_URL)
 
-        cmd.append(FLOW_URL)  # mở ngay Flow URL
-
-        # Kiểm tra nếu port đã dùng (Chrome debug đang chạy) → đóng trước
-        if self._is_port_open(9222):
-            self.log("⚠ Port 9222 đã được dùng — thử kết nối vào Chrome đó...")
-            return self.connect_existing()
-
-        self.log(f"🚀 Launch Chrome: {os.path.basename(chrome_exe)}")
-        self.log(f"   Profile: VEO3_Profile | Tải về: {dl_dir}")
+        self.log(f"Launch Chrome voi profile: {profile_dir} (co day du Google auth)")
+        self.log(f"Tai ve: {dl_dir}")
         try:
-            # Windows không hỗ trợ close_fds=True khi có stdin/stdout
             subprocess.Popen(cmd, creationflags=0x00000008)  # DETACHED_PROCESS
         except Exception as e:
-            self.log(f"❌ Không chạy được Chrome: {e}")
+            self.log(f"Khong chay duoc Chrome: {e}")
             return False
 
-        # Chờ Chrome khởi động và port mở (tối đa 15s)
-        self.log("⏳ Chờ Chrome khởi động...")
-        for i in range(15):
+        # Cho Chrome khoi dong va port mo (toi da 20s)
+        self.log("Cho Chrome khoi dong...")
+        for i in range(20):
             time.sleep(1)
             if self._is_port_open(9222):
-                self.log(f"✅ Chrome đã sẵn sàng sau {i+1}s")
+                self.log(f"Chrome san sang sau {i+1}s")
                 break
         else:
-            self.log("⚠ Chrome chưa mở port sau 15s — thử kết nối bất chấp...")
+            self.log("Chrome chua mo port sau 20s - thu ket noi bat chap...")
 
-        # Kết nối WebDriver vào Chrome đang chạy
         return self.connect_existing()
+
 
 
     def is_alive(self):
