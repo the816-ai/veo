@@ -147,32 +147,22 @@ class BrowserController:
         os.makedirs(dl_dir, exist_ok=True)
         self._download_dir = dl_dir
 
-        # Dung profile Default THAT cua user (co day du auth token cho Google AI API)
-        # VEO3_Profile rieng biet se khong co token -> 403 Forbidden khi goi video API
-        chrome_data_dir = os.path.join(
-            os.environ.get('LOCALAPPDATA', os.path.expanduser('~')),
-            'Google', 'Chrome', 'User Data'
+        # Profile rieng cho tool - account Pro cua user dang o day
+        veo_profile = os.path.join(
+            os.path.expanduser("~"), "AppData", "Local",
+            "Google", "Chrome", "VEO3_Profile"
         )
-        profile_dir = 'Default'  # Dung profile chinh cua user
+        os.makedirs(veo_profile, exist_ok=True)
 
-        # Neu Chrome dang chay voi port 9222 -> ket noi luon khong can restart
+        # Neu Chrome dang chay voi port 9222 -> ket noi luon
         if self._is_port_open(9222):
             self.log("Port 9222 dang mo - ket noi vao Chrome hien tai...")
             return self.connect_existing()
 
-        # Kill Chrome cu de tranh conflict profile (khong the chay 2 Chrome cung profile)
-        self.log("Dong Chrome cu (neu co)...")
-        try:
-            subprocess.run(["taskkill", "/f", "/im", "chrome.exe"],
-                          capture_output=True, timeout=5)
-            time.sleep(2)
-        except: pass
-
-        # Build Chrome command voi Default profile
+        # Build Chrome command
         cmd = [chrome_exe,
             "--remote-debugging-port=9222",
-            f"--user-data-dir={chrome_data_dir}",
-            f"--profile-directory={profile_dir}",
+            f"--user-data-dir={veo_profile}",
             "--no-first-run",
             "--no-default-browser-check",
             "--start-maximized",
@@ -181,7 +171,7 @@ class BrowserController:
             cmd.append("--incognito")
         cmd.append(FLOW_URL)
 
-        self.log(f"Launch Chrome voi profile: {profile_dir} (co day du Google auth)")
+        self.log(f"Launch Chrome: VEO3_Profile (account Pro)")
         self.log(f"Tai ve: {dl_dir}")
         try:
             subprocess.Popen(cmd, creationflags=0x00000008)  # DETACHED_PROCESS
@@ -189,7 +179,6 @@ class BrowserController:
             self.log(f"Khong chay duoc Chrome: {e}")
             return False
 
-        # Cho Chrome khoi dong va port mo (toi da 20s)
         self.log("Cho Chrome khoi dong...")
         for i in range(20):
             time.sleep(1)
@@ -200,6 +189,8 @@ class BrowserController:
             self.log("Chrome chua mo port sau 20s - thu ket noi bat chap...")
 
         return self.connect_existing()
+
+
 
 
 
