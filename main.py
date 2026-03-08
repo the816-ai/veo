@@ -1575,59 +1575,76 @@ class VeoApp:
         self.running = True
         self.root.after(0, self.tv_progress.start)
         import random
+        results = []  # [(index, prompt_short, status, filename_or_error)]
         try:
             for i, line in enumerate(lines, 1):
-                if not self.running: break
+                if not self.running:
+                    results.append((i, line[:50], '⏹ Dừng', ''))
+                    break
 
-                # Parse dòng JSON hoặc plain
                 prompt_text, aspect_ratio, duration, meta = self._parse_line(line)
-                self.log(f"\n── [{i}/{len(lines)}] {prompt_text[:70]}...")
+                short = prompt_text[:60]
+                self.log(f"\n══ [{i}/{len(lines)}] {short}...")
                 if meta:
-                    self.log(f"   📌 Ratio: {aspect_ratio} | Duration: {duration}s | Style: {meta.get('style','')}")
+                    self.log(f"   📌 Ratio: {aspect_ratio} | Duration: {duration}s")
 
                 delay_map = {"normal": 5, "double": 10, "random": None}
                 d_val = delay_map.get(self.tv_delay.get(), 5)
                 delay = d_val if d_val is not None else random.randint(6, 15)
 
-                # ── Lần đầu: tạo project mới. Từ lần 2+: chờ ô prompt rồi dán thẳng ──
+                # Tạo / tái dùng project
                 if i == 1:
-                    self.log("🆕 Tạo project mới (lần đầu)...")
+                    self.log("🆕 Tạo project mới...")
                     ok = self.bc.new_project()
                     if not ok:
-                        self.log("❌ Không tạo được project — dừng")
+                        self.log(f"❌ #{i} Lỗi: Không tạo được project")
+                        results.append((i, short, '❌ Lỗi tạo project', ''))
                         break
                     time.sleep(2)
                 else:
-                    self.log(f"♻️ Tái dùng project — chờ ô prompt [{i}/{len(lines)}]...")
+                    self.log(f"♻️ Tái dùng project [{i}/{len(lines)}]...")
                     ready = self.bc.wait_for_prompt_ready(timeout=60)
                     if not ready:
-                        self.log("⚠ Không thấy ô prompt — tạo project mới...")
+                        self.log("⚠ Tạo project mới (fallback)...")
                         ok = self.bc.new_project()
-                        if not ok: continue
+                        if not ok:
+                            results.append((i, short, '❌ Lỗi tạo project', ''))
+                            continue
                         time.sleep(2)
 
-                # Set tỷ lệ nếu có trong JSON
                 if aspect_ratio and aspect_ratio != "16:9":
                     self.bc.set_aspect_ratio(aspect_ratio)
 
                 ok = self.bc.set_prompt(prompt_text)
-                if not ok: continue
+                if not ok:
+                    self.log(f"❌ #{i} Lỗi: Không dán được prompt")
+                    results.append((i, short, '❌ Lỗi dán prompt', ''))
+                    continue
                 time.sleep(0.8)
 
                 ok = self.bc.click_generate()
-                if not ok: continue
+                if not ok:
+                    self.log(f"❌ #{i} Lỗi: Không click được nút Tạo")
+                    results.append((i, short, '❌ Lỗi nút Tạo', ''))
+                    continue
 
                 fname = f"{self.tv_base.get()}_{i:02d}.mp4"
-                self.bc.wait_and_download(out_dir, fname, timeout=int(self.tv_timeout.get()))
+                dl_ok = self.bc.wait_and_download(out_dir, fname, timeout=int(self.tv_timeout.get()))
+                if dl_ok:
+                    results.append((i, short, '✅ Thành công', fname))
+                else:
+                    results.append((i, short, '⚠ Tạo xong nhưng không tải được', fname))
 
                 if i < len(lines):
                     self.log(f"⏳ Chờ {delay}s rồi prompt tiếp...")
                     time.sleep(delay)
+        except Exception as e:
+            self.log(f"❌ Lỗi ngoài dự kiến: {e}")
         finally:
             self.running = False
             self.root.after(0, self.tv_progress.stop)
             self.root.after(0, lambda: self.tv_status_lbl.config(text=""))
-            self.log(f"\n✅ Hoàn tất Text→Video! Video đã lưu tại:\n   {out_dir}")
+            self._log_summary("Text→Video", results, out_dir)
 
     def _stop(self):
         """Dừng worker đang chạy"""
@@ -1636,6 +1653,36 @@ class VeoApp:
             self.log("⏹ Đã gửi lệnh dừng — chờ bước hiện tại kết thúc...")
         else:
             self.log("ℹ️ Không có tiến trình nào đang chạy")
+
+    def _log_summary(self, mode_name, results, out_dir):
+        """In bảng tổng kết cuối cùng — prompt nào OK, prompt nào lỗi ở bước nào."""
+        total   = len(results)
+        ok_list = [r for r in results if '✅' in r[2]]
+        fail_list = [r for r in results if '❌' in r[2] or '⚠' in r[2]]
+        stop_list = [r for r in results if '⏹' in r[2]]
+
+        self.log(f"\n{'═'*60}")
+        self.log(f"📊  TỔNG KẾT — {mode_name}")
+        self.log(f"{'═'*60}")
+        self.log(f"   Tổng: {total}  |  ✅ Thành công: {len(ok_list)}  |  ❌ Lỗi: {len(fail_list)}  |  ⏹ Dừng: {len(stop_list)}")
+        self.log(f"   📂 Thư mục: {out_dir}")
+
+        if ok_list:
+            self.log(f"\n   ── ✅ THÀNH CÔNG ({len(ok_list)}) ──")
+            for idx, short, status, fname in ok_list:
+                self.log(f"   #{idx:02d}  {fname}  ←  {short}")
+
+        if fail_list:
+            self.log(f"\n   ── ❌ THẤT BẠI ({len(fail_list)}) ──")
+            for idx, short, status, fname in fail_list:
+                self.log(f"   #{idx:02d}  {status}  ←  {short}")
+
+        if stop_list:
+            self.log(f"\n   ── ⏹ DỪNG ──")
+            for idx, short, status, fname in stop_list:
+                self.log(f"   #{idx:02d}  {status}  ←  {short}")
+
+        self.log(f"{'═'*60}\n")
 
     def _start_rapid(self):
         """⚡ Rapid Mode: Submit tất cả nhanh → render song song trên cloud"""
@@ -1868,11 +1915,15 @@ class VeoApp:
         self.running = True
         self.root.after(0, self.ti_progress.start)
         import random
+        results = []
         try:
             for i, prompt in enumerate(lines, 1):
-                if not self.running: break
+                if not self.running:
+                    results.append((i, prompt[:50], '⏹ Dừng', ''))
+                    break
 
-                self.log(f"\n── 🖼️ [{i}/{len(lines)}] {prompt[:70]}...")
+                short = prompt[:60]
+                self.log(f"\n══ 🖼️ [{i}/{len(lines)}] {short}...")
                 self.root.after(0, lambda ii=i, t=len(lines), p=prompt[:40]:
                     self.ti_status_lbl.config(text=f"🖼️ [{ii}/{t}] {p}..."))
 
@@ -1880,42 +1931,52 @@ class VeoApp:
                 d_val = delay_map.get(self.ti_delay.get(), 5)
                 delay = d_val if d_val is not None else random.randint(6, 15)
 
-                # Lần đầu tạo project mới, sau đó tái dùng
                 if i == 1:
-                    self.log("🆕 Tạo project mới (lần đầu)...")
+                    self.log("🆕 Tạo project mới...")
                     ok = self.bc.new_project()
                     if not ok:
-                        self.log("❌ Không tạo được project — dừng")
+                        results.append((i, short, '❌ Lỗi tạo project', ''))
                         break
                     time.sleep(2)
                 else:
-                    self.log(f"♻️ Tái dùng project — chờ ô prompt [{i}/{len(lines)}]...")
+                    self.log(f"♻️ Tái dùng project [{i}/{len(lines)}]...")
                     ready = self.bc.wait_for_prompt_ready(timeout=60)
                     if not ready:
-                        self.log("⚠ Không thấy ô prompt — tạo project mới...")
                         ok = self.bc.new_project()
-                        if not ok: continue
+                        if not ok:
+                            results.append((i, short, '❌ Lỗi tạo project', ''))
+                            continue
                         time.sleep(2)
 
                 ok = self.bc.set_prompt(prompt)
-                if not ok: continue
+                if not ok:
+                    results.append((i, short, '❌ Lỗi dán prompt', ''))
+                    continue
                 time.sleep(0.8)
 
                 ok = self.bc.click_generate()
-                if not ok: continue
+                if not ok:
+                    results.append((i, short, '❌ Lỗi nút Tạo', ''))
+                    continue
 
                 fname = f"{self.ti_base.get()}_{i:02d}.png"
-                self.bc.wait_and_download_image(out_dir, fname,
+                dl_ok = self.bc.wait_and_download_image(out_dir, fname,
                     timeout=int(self.ti_timeout.get()))
+                if dl_ok:
+                    results.append((i, short, '✅ Thành công', fname))
+                else:
+                    results.append((i, short, '⚠ Không tải được', fname))
 
                 if i < len(lines):
                     self.log(f"⏳ Chờ {delay}s rồi prompt tiếp...")
                     time.sleep(delay)
+        except Exception as e:
+            self.log(f"❌ Lỗi ngoài dự kiến: {e}")
         finally:
             self.running = False
             self.root.after(0, self.ti_progress.stop)
             self.root.after(0, lambda: self.ti_status_lbl.config(text=""))
-            self.log(f"\n✅ Hoàn tất Text→Image! Ảnh đã lưu tại:\n   {out_dir}")
+            self._log_summary("Text→Image", results, out_dir)
 
     # ── TAB 4: Nhân Vật ─────────────────────────────────
     def _tab_char_setup(self):
@@ -2186,21 +2247,25 @@ class VeoApp:
         self.root.after(0, self.cv_progress.start)
         import random
         delay_map = {"normal": 5, "double": 10, "random": None}
-        chars = list(self.characters.items())  # [(name, path), ...]
+        chars = list(self.characters.items())
+        results = []
         try:
             for i, prompt in enumerate(prompts, 1):
-                if not self.running: break
-                self.log(f"\n── [{i}/{len(prompts)}] {prompt[:60]}...")
+                if not self.running:
+                    results.append((i, prompt[:50], '⏹ Dừng', ''))
+                    break
+                short = prompt[:50]
+                self.log(f"\n══ [{i}/{len(prompts)}] {short}...")
 
-                # Detect nhân vật trong prompt
                 detected = [(n, p) for n, p in chars if n.lower() in prompt.lower()]
-                # Nếu detect được thì dùng detected, ngược lại upload TẤT CẢ nhân vật
                 to_upload = detected if detected else chars
                 if to_upload:
-                    self.log(f"   👤 Nhân vật: {[n for n,_ in to_upload]} ({'detect' if detected else 'tất cả'})")
+                    self.log(f"   👤 Nhân vật: {[n for n,_ in to_upload]}")
 
                 ok = self.bc.new_project()
-                if not ok: continue
+                if not ok:
+                    results.append((i, short, '❌ Lỗi tạo project', ''))
+                    continue
                 time.sleep(2)
 
                 # Upload ảnh nhân vật trước khi nhập prompt
@@ -2217,20 +2282,26 @@ class VeoApp:
                 except: pass
 
                 ok = self.bc.set_prompt(prompt)
-                if not ok: continue
+                if not ok:
+                    results.append((i, short, '❌ Lỗi dán prompt', ''))
+                    continue
                 time.sleep(1)
 
                 ok = self.bc.click_generate()
-                if not ok: continue
+                if not ok:
+                    results.append((i, short, '❌ Lỗi nút Tạo', ''))
+                    continue
 
                 fname = f"{self.cv_base.get()}_{i:02d}.mp4"
                 self.root.after(0, lambda fi=fname: self.cv_status_lbl.config(
                     text=f"⬇️ Chờ + tải {fi}..."))
-                ok = self.bc.wait_and_download(out_dir, fname, timeout=int(self.cv_timeout.get()))
-                if ok:
+                dl_ok = self.bc.wait_and_download(out_dir, fname, timeout=int(self.cv_timeout.get()))
+                if dl_ok:
+                    results.append((i, prompt[:50], '✅ Thành công', fname))
                     self.root.after(0, lambda fi=fname: self.cv_status_lbl.config(
                         text=f"✅ Tải xong: {fi}"))
                 else:
+                    results.append((i, prompt[:50], '⚠ Không tải được', fname))
                     self.root.after(0, lambda fi=fname: self.cv_status_lbl.config(
                         text=f"⏭ Bỏ qua: {fi}"))
 
@@ -2239,11 +2310,13 @@ class VeoApp:
                 if i < len(prompts):
                     self.log(f"⏳ Chờ {d}s rồi sang prompt tiếp...")
                     time.sleep(d)
+        except Exception as e:
+            self.log(f"❌ Lỗi ngoài dự kiến: {e}")
         finally:
             self.running = False
             self.root.after(0, self.cv_progress.stop)
             self.root.after(0, lambda: self.cv_status_lbl.config(text=""))
-            self.log(f"\n✅ Hoàn tất Create Video! Video đã lưu tại:\n   {out_dir}")
+            self._log_summary("Tạo Video Nhân Vật", results, out_dir)
 
     def _test_char_select(self):
         """Test: chỉ upload ảnh, không generate"""
