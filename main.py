@@ -11,6 +11,7 @@ FLOW_URL = "https://labs.google/fx/vi/tools/flow"
 CHROME_PROFILE = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Google", "Chrome", "User Data")
 OUTPUT_DIR_TEXT = str(Path.home() / "Downloads" / "VEO3_OUTPUT" / "text_to_video")
 OUTPUT_DIR_CHAR = str(Path.home() / "Downloads" / "VEO3_OUTPUT" / "character_video")
+OUTPUT_DIR_IMAGE = str(Path.home() / "Downloads" / "VEO3_OUTPUT" / "images")
 CHROMEDRIVER_PATH = None  # auto-detect via webdriver_manager
 
 # ─── Selenium imports (graceful) ───
@@ -959,6 +960,223 @@ class BrowserController:
             self.log(f"❌ upload_image: {e}")
             return False
 
+    def wait_and_download_image(self, save_dir, filename, timeout=180):
+        """Chờ ảnh tạo xong trên Flow → tải về ngay.
+        Detect: nút Tải xuống / thẻ <img> mới / link download."""
+        self.log(f"⏳ Chờ ảnh + tự động tải (tối đa {timeout}s)...")
+        os.makedirs(save_dir, exist_ok=True)
+        start    = time.time()
+        last_log = 0
+
+        # Set CDP download folder
+        try:
+            self.driver.execute_cdp_cmd(
+                "Browser.setDownloadBehavior",
+                {"behavior": "allow", "downloadPath": save_dir}
+            )
+        except: pass
+
+        # Snapshot thư mục
+        chrome_dl  = str(Path.home() / "Downloads")
+        watch_dirs = list({save_dir, chrome_dl})
+        snap = {d: set(os.listdir(d)) if os.path.exists(d) else set()
+                for d in watch_dirs}
+
+        DL_XPATHS = [
+            "//button[normalize-space(.)='Tải xuống']",
+            "//button[normalize-space(.)='Download']",
+            "//button[@aria-label='Tải xuống' or @aria-label='Download']",
+            "//button[contains(.,'Tải xuống') or contains(.,'Download')]",
+            "//a[contains(@href,'.png') or contains(@href,'.jpg') or contains(@href,'.webp')]",
+        ]
+
+        dl_btn = None
+        while time.time() - start < timeout:
+            time.sleep(5)
+            elapsed = int(time.time() - start)
+
+            try:
+                # 1. Tìm nút Tải xuống
+                for xpath in DL_XPATHS:
+                    try:
+                        btns = self.driver.find_elements(By.XPATH, xpath)
+                        vis  = [b for b in btns if b.is_displayed()]
+                        if vis:
+                            dl_btn = vis[0]
+                            break
+                    except: continue
+
+                if dl_btn:
+                    self.log(f"🎉 Ảnh xong sau {elapsed}s! Click tải ngay...")
+                    break
+
+                # 2. Detect ảnh qua JS: tìm img mới hoặc canvas
+                try:
+                    img_ready = self.driver.execute_script("""
+                        // Tìm ảnh generated (không phải icon/avatar)
+                        var imgs = document.querySelectorAll('img[src]');
+                        for (var i = 0; i < imgs.length; i++) {
+                            var src = imgs[i].src;
+                            var w = imgs[i].naturalWidth || 0;
+                            if (w > 200 && (src.includes('blob:') || src.includes('storage.google')
+                                || src.includes('generated') || src.includes('lh3.google'))) {
+                                return src;
+                            }
+                        }
+                        return null;
+                    """)
+                    if img_ready and not dl_btn:
+                        self.log(f"📸 Ảnh detected ({elapsed}s) — thử tải trực tiếp...")
+                        # Thử tải ảnh qua JS
+                        if self._download_image_js(img_ready, save_dir, filename):
+                            return True
+                except: pass
+
+                # Log mỗi 30s
+                if elapsed - last_log >= 30:
+                    pct = min(95, int(elapsed / timeout * 100))
+                    self.log(f"   ⏳ {elapsed}s/{timeout}s (~{pct}%) — đang tạo ảnh...")
+                    last_log = elapsed
+
+            except Exception: pass
+
+        if not dl_btn:
+            # Thử lần cuối: tải ảnh lớn nhất trong DOM
+            self.log("⏱ Timeout — thử tải ảnh từ DOM...")
+            return self._download_largest_image(save_dir, filename)
+
+        # ── Click nút (3 cách) ──
+        clicked = False
+        for attempt in range(3):
+            try:
+                if attempt == 0:
+                    ActionChains(self.driver).move_to_element(dl_btn).click().perform()
+                elif attempt == 1:
+                    self.driver.execute_script("arguments[0].click();", dl_btn)
+                else:
+                    dl_btn.click()
+                self.log(f"⬇️ Đã click tải ảnh (cách {attempt+1})")
+                clicked = True
+                break
+            except Exception as ce:
+                self.log(f"   ⚠ Click lần {attempt+1}: {ce}")
+                time.sleep(0.5)
+
+        if not clicked:
+            return self._download_largest_image(save_dir, filename)
+
+        # ── Chờ file xuất hiện (60s) ──
+        deadline = time.time() + 60
+        new_file = None
+        new_dir  = save_dir
+        img_exts = (".png", ".jpg", ".jpeg", ".webp")
+
+        while time.time() < deadline:
+            time.sleep(2)
+            for d in watch_dirs:
+                if not os.path.exists(d): continue
+                current = set(os.listdir(d))
+                added   = current - snap[d]
+                done = [f for f in added
+                        if any(f.lower().endswith(e) for e in img_exts)
+                        and not f.endswith(".crdownload")]
+                if done:
+                    new_file = done[0]; new_dir = d; break
+            if new_file: break
+
+        if not new_file:
+            self.log("⚠ File ảnh không xuất hiện — thử tải từ DOM...")
+            return self._download_largest_image(save_dir, filename)
+
+        # Chờ ổn định
+        src = os.path.join(new_dir, new_file)
+        time.sleep(2)
+
+        # Đổi tên
+        ext = Path(new_file).suffix or ".png"
+        dst = os.path.join(save_dir, filename.rsplit('.', 1)[0] + ext)
+        if os.path.exists(dst):
+            ts  = time.strftime("%H%M%S")
+            dst = dst.rsplit('.', 1)[0] + f"_{ts}" + ext
+        try:
+            shutil.move(src, dst)
+            kb = os.path.getsize(dst) / 1024
+            self.log(f"✅ Đã lưu ảnh: {os.path.basename(dst)} ({kb:.0f} KB)")
+            return True
+        except Exception as me:
+            self.log(f"⚠ Di chuyển file lỗi: {me}")
+            return False
+
+    def _download_image_js(self, img_url, save_dir, filename):
+        """Tải ảnh từ URL (blob: hoặc https) qua JS."""
+        try:
+            if img_url.startswith("blob:"):
+                b64 = self.driver.execute_script("""
+                    var url = arguments[0];
+                    var canvas = document.createElement('canvas');
+                    var img = new Image();
+                    img.crossOrigin = 'anonymous';
+                    return new Promise(function(resolve) {
+                        img.onload = function() {
+                            canvas.width = img.naturalWidth;
+                            canvas.height = img.naturalHeight;
+                            canvas.getContext('2d').drawImage(img, 0, 0);
+                            resolve(canvas.toDataURL('image/png').split(',')[1]);
+                        };
+                        img.onerror = function() { resolve(null); };
+                        img.src = url;
+                    });
+                """, img_url)
+                if b64:
+                    import base64
+                    dst = os.path.join(save_dir, filename.rsplit('.', 1)[0] + ".png")
+                    with open(dst, 'wb') as f:
+                        f.write(base64.b64decode(b64))
+                    kb = os.path.getsize(dst) / 1024
+                    self.log(f"✅ JS blob ảnh: {os.path.basename(dst)} ({kb:.0f} KB)")
+                    return True
+            else:
+                import urllib.request as _ur
+                cookies = self.driver.get_cookies()
+                cookie_str = '; '.join(f"{c['name']}={c['value']}" for c in cookies)
+                req = _ur.Request(img_url, headers={
+                    'User-Agent': 'Mozilla/5.0',
+                    'Cookie': cookie_str,
+                    'Referer': self.driver.current_url,
+                })
+                ext = ".png"
+                for e in ['.jpg', '.jpeg', '.webp', '.png']:
+                    if e in img_url.lower():
+                        ext = e; break
+                dst = os.path.join(save_dir, filename.rsplit('.', 1)[0] + ext)
+                with _ur.urlopen(req, timeout=30) as resp, open(dst, 'wb') as f:
+                    f.write(resp.read())
+                kb = os.path.getsize(dst) / 1024
+                self.log(f"✅ URL ảnh: {os.path.basename(dst)} ({kb:.0f} KB)")
+                return True
+        except Exception as e:
+            self.log(f"⚠ Download ảnh JS lỗi: {e}")
+        return False
+
+    def _download_largest_image(self, save_dir, filename):
+        """Fallback: tìm ảnh lớn nhất trong DOM rồi tải."""
+        try:
+            result = self.driver.execute_script("""
+                var best = null, maxW = 0;
+                document.querySelectorAll('img[src]').forEach(function(img) {
+                    var w = img.naturalWidth || 0;
+                    if (w > maxW && w > 200) { maxW = w; best = img.src; }
+                });
+                return best;
+            """)
+            if result:
+                self.log(f"🔍 Tìm thấy ảnh {result[:60]}...")
+                return self._download_image_js(result, save_dir, filename)
+        except Exception as e:
+            self.log(f"⚠ Fallback ảnh lỗi: {e}")
+        self.log("❌ Không tìm thấy ảnh để tải")
+        return False
+
 
 
 # ─── Màu nền tối chuyên nghiệp ───
@@ -1048,6 +1266,7 @@ class VeoApp:
         self._tab_note()
         self._tab_browser()
         self._tab_text2video()
+        self._tab_text2image()
         self._tab_char_setup()
         self._tab_create_video()
         self._tab_logs()
@@ -1184,7 +1403,7 @@ class VeoApp:
                 return
             sample = "A beautiful sunset over the ocean, cinematic lighting, 8K"
             self.log("🧪 TEST: Mở project mới + dán prompt mẫu...")
-            self.nb.select(5)
+            self.nb.select(6)
             def _run():
                 ok = self.bc.new_project()
                 if ok:
@@ -1285,23 +1504,13 @@ class VeoApp:
                         activebackground=CARD, font=("Segoe UI", 9)
                         ).pack(side=LEFT, padx=8)
 
-        # Timeout
-        tf = self._card(f, "⬇️ Chờ video xong → Tự động tải (thoát sớm khi xong)")
+        # Timeout — cố định 10 phút, phát hiện xong tải ngay
+        tf = self._card(f, "⬇️ Tự động chờ video xong → Tải về ngay")
         tf.pack(fill=X, padx=12, pady=4)
         self.tv_timeout = StringVar(value="600")
-        timeout_opts = [
-            ("TỰ ĐỘNG — Chờ đến khi xong, tối đa 10 phút  ⬇️  Tải ngay", "600"),
-            ("Tối đa 5 phút  ⬇️  Tải ngay khi xong", "300"),
-            ("Tối đa 3 phút  ⬇️  Tải ngay khi xong", "180"),
-            ("Tối đa 1 phút  ⬇️  Tải ngay khi xong", "60"),
-            ("30 giây  (submit nhanh, không tải về)", "30"),
-        ]
-        for txt, val in timeout_opts:
-            Radiobutton(tf, text=txt, variable=self.tv_timeout, value=val,
-                        bg=CARD, fg=TEXT, selectcolor=BG,
-                        activebackground=CARD, font=("Segoe UI", 9)
-                        ).pack(anchor=W, padx=12)
-        Label(tf, text="  ℹ️  Tool thoát ngay khi video xong, không cần đợi hết giờ!",
+        Label(tf, text="  ⏳  Chờ đến khi video xong, tối đa 10 phút  →  Tải xuống ngay khi phát hiện hoàn tất",
+              font=("Segoe UI", 9, "bold"), bg=CARD, fg=GREEN).pack(anchor=W, padx=12, pady=6)
+        Label(tf, text="  ℹ️  Tool phát hiện video xong sẽ tải ngay, không cần chờ hết 10 phút!",
               font=("Segoe UI", 8), bg=CARD, fg=MUTED).pack(anchor=W, padx=20, pady=(0,4))
 
         # Progress + buttons
@@ -1333,7 +1542,7 @@ class VeoApp:
         out_dir = self.tv_out.get()
         os.makedirs(out_dir, exist_ok=True)
         self.log(f"🚀 Bắt đầu Text→Video: {len(lines)} prompt(s)")
-        self.nb.select(5)  # switch to Logs tab
+        self.nb.select(6)  # switch to Logs tab
         self._run_bg(lambda: self._t2v_worker(lines, out_dir))
 
     @staticmethod
@@ -1441,7 +1650,7 @@ class VeoApp:
         out_dir = self.tv_out.get()
         os.makedirs(out_dir, exist_ok=True)
         self.log(f"⚡ RAPID MODE: Submit {len(lines)} prompt(s) nhanh → render song song!")
-        self.nb.select(5)
+        self.nb.select(6)
         self._run_bg(lambda: self._rapid_worker(lines, out_dir))
 
     def _rapid_worker(self, lines, out_dir):
@@ -1553,6 +1762,160 @@ class VeoApp:
         self.root.after(0, self.tv_progress.stop)
         self.root.after(0, lambda: self.tv_status_lbl.config(text=""))
         self.log(f"\n✅ RAPID xong! Nhận {found}/{submitted} video → {out_dir}")
+
+    # ── TAB: Tạo Ảnh ─────────────────────────────────────
+    def _tab_text2image(self):
+        f = Frame(self.nb, bg=BG)
+        self.nb.add(f, text="🖼️  Tạo Ảnh")
+
+        # Header
+        hf = Frame(f, bg="#0A0F1A"); hf.pack(fill=X)
+        Label(hf, text="🖼️  Text → Image  (Nano Banana 2 trên Flow)",
+              font=("Segoe UI", 12, "bold"), bg="#0A0F1A", fg=ACCENT
+              ).pack(anchor=W, padx=16, pady=10)
+
+        # Prompt box
+        lf = self._card(f, "📝 Danh sách Prompt  (mỗi dòng 1 ảnh)")
+        lf.pack(fill=BOTH, expand=True, padx=12, pady=6)
+        self.ti_prompts = scrolledtext.ScrolledText(
+            lf, height=8, font=("Consolas", 9),
+            bg="#0D1117", fg=TEXT, insertbackground=TEXT, relief="flat")
+        self.ti_prompts.pack(fill=BOTH, expand=True, padx=4, pady=4)
+        self.ti_prompts.insert(END,
+            "A cute cat sitting on a rainbow cloud, digital art\n"
+            "A futuristic cityscape at sunset, cyberpunk style\n"
+            "Portrait of a samurai warrior, watercolor painting")
+
+        # Settings
+        sf = self._card(f, "⚙️ Cài đặt")
+        sf.pack(fill=X, padx=12, pady=4)
+        r1 = Frame(sf, bg=CARD); r1.pack(fill=X, pady=3, padx=8)
+        Label(r1, text="Tên file:", bg=CARD, fg=MUTED, font=("Segoe UI", 9)).pack(side=LEFT)
+        self.ti_base = Entry(r1, width=20, font=("Segoe UI", 9),
+                             bg="#0D1117", fg=TEXT, insertbackground=TEXT, relief="flat")
+        self.ti_base.insert(0, "image")
+        self.ti_base.pack(side=LEFT, padx=6, ipady=3)
+        r2 = Frame(sf, bg=CARD); r2.pack(fill=X, pady=3, padx=8)
+        Label(r2, text="Lưu tại:", bg=CARD, fg=MUTED, font=("Segoe UI", 9)).pack(side=LEFT)
+        self.ti_out = Entry(r2, width=55, font=("Segoe UI", 9),
+                            bg="#0D1117", fg=TEXT, insertbackground=TEXT, relief="flat")
+        self.ti_out.insert(0, OUTPUT_DIR_IMAGE)
+        self.ti_out.pack(side=LEFT, padx=6, ipady=3)
+        self._btn(r2, "📂", lambda: self._browse(self.ti_out),
+                  color="#21262D").pack(side=LEFT, ipady=3, ipadx=4)
+
+        # Delay
+        df = self._card(f, "⏱ Độ trễ giữa các prompt")
+        df.pack(fill=X, padx=12, pady=4)
+        df_r = Frame(df, bg=CARD); df_r.pack(anchor=W, padx=8, pady=4)
+        self.ti_delay = StringVar(value="normal")
+        for txt, val in [("Bình thường (5s)", "normal"),
+                          ("Gấp đôi (10s)", "double"),
+                          ("Ngẫu nhiên (6-15s)", "random")]:
+            Radiobutton(df_r, text=txt, variable=self.ti_delay, value=val,
+                        bg=CARD, fg=TEXT, selectcolor=BG,
+                        activebackground=CARD, font=("Segoe UI", 9)
+                        ).pack(side=LEFT, padx=8)
+
+        # Timeout
+        tf = self._card(f, "⬇️ Chờ ảnh xong → Tự động tải")
+        tf.pack(fill=X, padx=12, pady=4)
+        self.ti_timeout = StringVar(value="180")
+        ti_opts = [
+            ("TỰ ĐỘNG — Chờ đến khi xong (tối đa 3 phút)  ⬇️  Tải ngay", "180"),
+            ("Tối đa 2 phút  ⬇️  Tải ngay khi xong", "120"),
+            ("Tối đa 1 phút  ⬇️  Tải ngay khi xong", "60"),
+        ]
+        for txt, val in ti_opts:
+            Radiobutton(tf, text=txt, variable=self.ti_timeout, value=val,
+                        bg=CARD, fg=TEXT, selectcolor=BG,
+                        activebackground=CARD, font=("Segoe UI", 9)
+                        ).pack(anchor=W, padx=12)
+        Label(tf, text="  ℹ️  Tool phát hiện ảnh xong tải ngay, không chờ hết giờ!",
+              font=("Segoe UI", 8), bg=CARD, fg=MUTED).pack(anchor=W, padx=20, pady=(0, 4))
+
+        # Progress
+        self.ti_progress = ttk.Progressbar(f, mode="indeterminate", style="TProgressbar")
+        self.ti_progress.pack(fill=X, padx=12, pady=(6, 2))
+        self.ti_status_lbl = Label(f, text="", font=("Segoe UI", 8), bg=BG, fg=MUTED)
+        self.ti_status_lbl.pack()
+
+        # Buttons
+        btn_row = Frame(f, bg=BG); btn_row.pack(fill=X, padx=12, pady=8)
+        self._btn(btn_row, "  ▶  START — Tạo ảnh tuần tự + Tải về",
+                  self._start_text2image, color=GREEN
+                  ).pack(side=LEFT, fill=X, expand=True, ipady=9, padx=(0, 4))
+        self._btn(btn_row, "  ⏹  STOP",
+                  self._stop, color=RED
+                  ).pack(side=LEFT, ipady=9, ipadx=8)
+
+    def _start_text2image(self):
+        raw = self.ti_prompts.get("1.0", END).strip()
+        lines = [l.strip() for l in raw.splitlines() if l.strip() and not l.startswith("#")]
+        if not lines:
+            messagebox.showerror("Lỗi", "Chưa nhập prompt!")
+            return
+        if not self.bc.is_alive():
+            messagebox.showerror("Lỗi", "Chưa mở Chrome! Vào tab Browser & Setup trước.")
+            return
+        out_dir = self.ti_out.get()
+        os.makedirs(out_dir, exist_ok=True)
+        self.log(f"🖼️ Bắt đầu Text→Image: {len(lines)} prompt(s)")
+        self.nb.select(6)  # switch to Logs tab (index shifted)
+        self._run_bg(lambda: self._t2i_worker(lines, out_dir))
+
+    def _t2i_worker(self, lines, out_dir):
+        self.running = True
+        self.root.after(0, self.ti_progress.start)
+        import random
+        try:
+            for i, prompt in enumerate(lines, 1):
+                if not self.running: break
+
+                self.log(f"\n── 🖼️ [{i}/{len(lines)}] {prompt[:70]}...")
+                self.root.after(0, lambda ii=i, t=len(lines), p=prompt[:40]:
+                    self.ti_status_lbl.config(text=f"🖼️ [{ii}/{t}] {p}..."))
+
+                delay_map = {"normal": 5, "double": 10, "random": None}
+                d_val = delay_map.get(self.ti_delay.get(), 5)
+                delay = d_val if d_val is not None else random.randint(6, 15)
+
+                # Lần đầu tạo project mới, sau đó tái dùng
+                if i == 1:
+                    self.log("🆕 Tạo project mới (lần đầu)...")
+                    ok = self.bc.new_project()
+                    if not ok:
+                        self.log("❌ Không tạo được project — dừng")
+                        break
+                    time.sleep(2)
+                else:
+                    self.log(f"♻️ Tái dùng project — chờ ô prompt [{i}/{len(lines)}]...")
+                    ready = self.bc.wait_for_prompt_ready(timeout=60)
+                    if not ready:
+                        self.log("⚠ Không thấy ô prompt — tạo project mới...")
+                        ok = self.bc.new_project()
+                        if not ok: continue
+                        time.sleep(2)
+
+                ok = self.bc.set_prompt(prompt)
+                if not ok: continue
+                time.sleep(0.8)
+
+                ok = self.bc.click_generate()
+                if not ok: continue
+
+                fname = f"{self.ti_base.get()}_{i:02d}.png"
+                self.bc.wait_and_download_image(out_dir, fname,
+                    timeout=int(self.ti_timeout.get()))
+
+                if i < len(lines):
+                    self.log(f"⏳ Chờ {delay}s rồi prompt tiếp...")
+                    time.sleep(delay)
+        finally:
+            self.running = False
+            self.root.after(0, self.ti_progress.stop)
+            self.root.after(0, lambda: self.ti_status_lbl.config(text=""))
+            self.log(f"\n✅ Hoàn tất Text→Image! Ảnh đã lưu tại:\n   {out_dir}")
 
     # ── TAB 4: Nhân Vật ─────────────────────────────────
     def _tab_char_setup(self):
@@ -1757,22 +2120,13 @@ class VeoApp:
                         activebackground=CARD, font=("Segoe UI", 9)
                         ).pack(side=LEFT, padx=8)
 
-        # Timeout chờ video + tải tự động
-        tf = self._card(f, "⬇️ Chờ video xong → Tự động tải (thoát sớm khi xong)")
+        # Timeout — cố định 10 phút, phát hiện xong tải ngay
+        tf = self._card(f, "⬇️ Tự động chờ video xong → Tải về ngay")
         tf.pack(fill=X, padx=12, pady=4)
         self.cv_timeout = StringVar(value="600")
-        cv_opts = [
-            ("TỰ ĐỘNG — Chờ đến khi xong (tối đa 10 phút)  ⬇️  Tải ngay", "600"),
-            ("Tối đa 5 phút  ⬇️  Tải ngay khi xong", "300"),
-            ("Tối đa 3 phút  ⬇️  Tải ngay khi xong", "180"),
-            ("30 giây  (submit nhanh, không tải về)", "30"),
-        ]
-        for txt, val in cv_opts:
-            Radiobutton(tf, text=txt, variable=self.cv_timeout, value=val,
-                        bg=CARD, fg=TEXT, selectcolor=BG,
-                        activebackground=CARD, font=("Segoe UI", 9)
-                        ).pack(anchor=W, padx=12)
-        Label(tf, text="  ℹ️  Tool thoát ngay khi video xong!",
+        Label(tf, text="  ⏳  Chờ đến khi video xong, tối đa 10 phút  →  Tải xuống ngay khi phát hiện hoàn tất",
+              font=("Segoe UI", 9, "bold"), bg=CARD, fg=GREEN).pack(anchor=W, padx=12, pady=6)
+        Label(tf, text="  ℹ️  Tool phát hiện video xong sẽ tải ngay, không cần chờ hết 10 phút!",
               font=("Segoe UI", 8), bg=CARD, fg=MUTED).pack(anchor=W, padx=20, pady=(0,4))
 
         self.cv_progress = ttk.Progressbar(f, mode="indeterminate", style="TProgressbar")
@@ -1809,7 +2163,7 @@ class VeoApp:
 
     def _on_tab_change(self, evt):
         idx = self.nb.index(self.nb.select())
-        if idx == 4:  # Create Video tab
+        if idx == 5:  # Create Video tab
             self._refresh_char_display()
 
     def _start_create_video(self):
@@ -1824,7 +2178,7 @@ class VeoApp:
         out_dir = self.cv_out.get()
         os.makedirs(out_dir, exist_ok=True)
         self.log(f"🚀 Create Video: {len(prompts)} prompt(s), {len(self.characters)} nhân vật")
-        self.nb.select(5)
+        self.nb.select(6)
         self._run_bg(lambda: self._create_video_worker(prompts, out_dir))
 
     def _create_video_worker(self, prompts, out_dir):
