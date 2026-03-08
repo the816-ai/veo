@@ -343,46 +343,67 @@ class BrowserController:
 
 
     def wait_for_video(self, timeout=300):
-        """Chờ video tạo xong — chỉ check SUCCESS, không check error giả"""
+        """Chờ video tạo xong — đa selector, log tiến độ rõ ràng"""
         self.log(f"⏳ Chờ video hoàn thành (tối đa {timeout}s)...")
         start = time.time()
-        check_interval = 10  # kiểm tra mỗi 10s
         last_log = 0
 
+        # Tất cả selector có thể chỉ ra video xong
+        DL_XPATHS = [
+            "//button[normalize-space(.)='Tải xuống']",
+            "//button[normalize-space(.)='Download']",
+            "//button[@aria-label='Tải xuống' or @aria-label='Download']",
+            "//button[contains(.,'Tải xuống') or contains(.,'Download')]",
+            "//a[contains(@href,'.mp4') and @download]",
+            "//button[.//mat-icon[contains(.,'download')] or .//span[contains(.,'download')]]",
+        ]
+
         while time.time() - start < timeout:
-            time.sleep(check_interval)
+            time.sleep(8)
             elapsed = int(time.time() - start)
 
             try:
-                # 1. Tìm nút "Tải xuống" — chỉ xuất hiện khi video xong
-                dl_btns = self.driver.find_elements(
-                    By.XPATH,
-                    "//button[normalize-space(.)='Tải xuống' or @aria-label='Tải xuống' or @aria-label='Download']"
-                )
-                if dl_btns:
-                    self.log(f"✅ Video hoàn thành sau {elapsed}s! Tìm thấy nút Tải xuống.")
-                    return True
+                # 1. Tìm nút Download (nhiều selector)
+                for xpath in DL_XPATHS:
+                    try:
+                        btns = self.driver.find_elements(By.XPATH, xpath)
+                        visible = [b for b in btns if b.is_displayed()]
+                        if visible:
+                            self.log(f"✅ Video xong sau {elapsed}s! Nút tải xuống sẵn sàng.")
+                            return True
+                    except: continue
 
-                # 2. URL đổi sang /edit/ — project đã tạo xong 1 clip
-                url = self.driver.current_url
-                if "/edit/" in url:
-                    # Tìm video element có src
+                # 2. Kiểm tra video element có src hợp lệ
+                try:
                     vids = self.driver.find_elements(By.TAG_NAME, "video")
                     for v in vids:
                         src = v.get_attribute("src") or ""
-                        if src and ("blob:" in src or "storage.googleapis" in src):
-                            self.log(f"✅ Video ready sau {elapsed}s!")
+                        if src and not src.startswith("data:") and len(src) > 10:
+                            self.log(f"✅ Video element sẵn sàng sau {elapsed}s!")
                             return True
+                except: pass
 
-                # Log tiến trình mỗi 30s
+                # 3. Kiểm tra URL /edit/ có video blob
+                try:
+                    url = self.driver.current_url
+                    if "/edit/" in url or "/project/" in url:
+                        vids = self.driver.find_elements(By.XPATH,
+                            "//video[contains(@src,'blob:') or contains(@src,'storage.google')]")
+                        if vids:
+                            self.log(f"✅ Video blob sẵn sàng sau {elapsed}s!")
+                            return True
+                except: pass
+
+                # Log mỗi 30s
                 if elapsed - last_log >= 30:
-                    self.log(f"   ⏳ {elapsed}s — đang render...")
+                    pct = min(95, int(elapsed / timeout * 100))
+                    self.log(f"   ⏳ {elapsed}s/{timeout}s (~{pct}%) — Flow đang render...")
                     last_log = elapsed
 
-            except Exception as e:
-                pass  # Chrome bận, thử lại sau
+            except Exception:
+                pass
 
-        self.log(f"⏱ Timeout sau {timeout}s — tiếp prompt tiếp")
+        self.log(f"⏱ Timeout {timeout}s — video chưa xong, bỏ qua tải")
         return False
 
 
@@ -418,110 +439,235 @@ class BrowserController:
             return False
 
     def click_download(self, save_dir, filename):
-        """Click Tải xuống → chờ file tải XONG hoàn toàn → đổi tên theo thứ tự"""
+        """Click Tải xuống → nhiều phương pháp → chờ file ổn định → đổi tên"""
         try:
             os.makedirs(save_dir, exist_ok=True)
 
-            # ── Bước 1: Set CDP download dir ──
+            # ── Bước 1: Set CDP để Chrome tự lưu đúng folder ──
             try:
                 self.driver.execute_cdp_cmd(
                     "Browser.setDownloadBehavior",
                     {"behavior": "allow", "downloadPath": save_dir}
                 )
+                self.log(f"📂 Thư mục tải về: {save_dir}")
             except: pass
 
-            # Monitor cả save_dir và ~/Downloads
+            # Monitor cả save_dir VÀ ~/Downloads (Chrome có thể tải vào đây)
             chrome_dl = str(Path.home() / "Downloads")
             watch_dirs = list({save_dir, chrome_dl})
-
-            # Snapshot SAU khi set CDP, TRƯỚC khi click
             snap = {d: set(os.listdir(d)) if os.path.exists(d) else set()
                     for d in watch_dirs}
 
-            # ── Bước 2: Tìm và click nút Tải xuống ──
+            # ── Bước 2: Tìm nút Tải xuống — 8 selector ──
+            DL_SELECTORS = [
+                (By.XPATH, "//button[normalize-space(.)='Tải xuống']"),
+                (By.XPATH, "//button[normalize-space(.)='Download']"),
+                (By.XPATH, "//button[@aria-label='Tải xuống']"),
+                (By.XPATH, "//button[@aria-label='Download']"),
+                (By.XPATH, "//button[contains(.,'Tải xuống')]"),
+                (By.XPATH, "//button[contains(.,'Download')]"),
+                (By.XPATH, "//a[contains(@href,'.mp4') and @download]"),
+                (By.XPATH, "//button[.//mat-icon[contains(.,'download')]]"),
+            ]
+
             dl_btn = None
-            for sel in [
-                "//button[normalize-space(.)='Tải xuống']",
-                "//button[@aria-label='Tải xuống' or @aria-label='Download']",
-                "//button[contains(.,'Tải xuống')]",
-                "//button[contains(.,'Download')]",
-                "//a[contains(@href,'.mp4')]",
-            ]:
+            for by, sel in DL_SELECTORS:
                 try:
-                    el = self.driver.find_element(By.XPATH, sel)
-                    if el and el.is_displayed():
-                        dl_btn = el
+                    els = self.driver.find_elements(by, sel)
+                    visible = [e for e in els if e.is_displayed()]
+                    if visible:
+                        dl_btn = visible[0]
+                        self.log(f"🔍 Tìm thấy nút tải: {sel[:50]}")
                         break
                 except: continue
 
             if not dl_btn:
-                self.log("⚠️ Không tìm thấy nút Tải xuống")
+                self.log("⚠️ Không tìm thấy nút Tải xuống — thử JS fallback...")
+                # ── Fallback: JS tìm <a href=.mp4> và tải trực tiếp ──
+                js_downloaded = self._js_download_fallback(save_dir, filename)
+                if js_downloaded:
+                    return True
+                self.log("❌ Không tải được — cần tải thủ công")
                 return False
 
-            ActionChains(self.driver).move_to_element(dl_btn).click().perform()
-            self.log("⬇️ Đã click Tải xuống — chờ file...")
+            # ── Bước 3: Click nút (thử 3 cách) ──
+            clicked = False
+            for attempt in range(3):
+                try:
+                    if attempt == 0:
+                        ActionChains(self.driver).move_to_element(dl_btn).click().perform()
+                    elif attempt == 1:
+                        self.driver.execute_script("arguments[0].click();", dl_btn)
+                    else:
+                        dl_btn.click()
+                    clicked = True
+                    self.log(f"⬇️ Đã click nút Tải xuống (cách {attempt+1})")
+                    break
+                except Exception as ce:
+                    self.log(f"   ⚠ Click lần {attempt+1} thất bại: {ce}")
+                    time.sleep(0.5)
 
-            # ── Bước 3: Chờ file .mp4 xuất hiện (tối đa 90s) ──
-            deadline = time.time() + 90
+            if not clicked:
+                self.log("❌ Không click được nút Tải xuống")
+                return False
+
+            # ── Bước 4: Chờ file xuất hiện (tối đa 180s) ──
+            deadline = time.time() + 180
             new_file = None
-            new_dir = save_dir
+            new_dir  = save_dir
+            last_log = time.time()
+
             while time.time() < deadline:
-                time.sleep(1.5)
+                time.sleep(2)
                 for d in watch_dirs:
                     if not os.path.exists(d): continue
                     current = set(os.listdir(d))
-                    added = current - snap[d]
-                    # File tải xong = .mp4, không phải .crdownload
+                    added   = current - snap[d]
+
+                    # File hoàn chỉnh (.mp4 không phải .crdownload)
                     done = [f for f in added
-                            if f.endswith(".mp4") and not f.endswith(".crdownload")]
+                            if f.lower().endswith(".mp4")
+                            and not f.endswith(".crdownload")]
                     if done:
-                        new_file = done[0]
-                        new_dir = d
-                        break
-                    # Còn đang tải → log progress
+                        new_file = done[0]; new_dir = d; break
+
+                    # Đang tải → log kích thước
                     partial = [f for f in added if f.endswith(".crdownload")]
-                    if partial:
-                        elapsed = int(time.time() - (deadline - 90))
-                        self.log(f"   ⬇️ Đang tải... {partial[0]} ({elapsed}s)")
-                if new_file:
-                    break
+                    if partial and time.time() - last_log > 10:
+                        try:
+                            sz = os.path.getsize(os.path.join(d, partial[0]))
+                            self.log(f"   ⬇️ Đang tải: {partial[0]} ({sz//1024//1024} MB)")
+                        except: pass
+                        last_log = time.time()
+
+                if new_file: break
 
             if not new_file:
-                self.log("⚠️ Hết giờ 90s — file không xuất hiện")
+                self.log("⚠️ Hết 180s — file không xuất hiện")
+                # Thử tìm file lớn nhất trong save_dir mới tạo
+                try:
+                    candidates = [
+                        f for f in os.listdir(save_dir)
+                        if f.lower().endswith(".mp4") and f not in snap.get(save_dir, set())
+                    ]
+                    if candidates:
+                        mp4s = sorted(candidates,
+                            key=lambda x: os.path.getmtime(os.path.join(save_dir, x)),
+                            reverse=True)
+                        new_file = mp4s[0]; new_dir = save_dir
+                        self.log(f"♻️ Tìm thấy file mới: {new_file}")
+                except: pass
+
+            if not new_file:
                 return False
 
-            # ── Bước 4: Chờ file ổn định (không còn ghi) ──
+            # ── Bước 5: Chờ file ổn định (không còn ghi) ──
             src = os.path.join(new_dir, new_file)
             self.log(f"⏳ Chờ file ổn định: {new_file}")
-            prev_size = -1
-            stable_count = 0
-            for _ in range(15):  # tối đa 15 lần × 1s = 15s
+            prev_size = -1; stable = 0
+            for _ in range(20):
                 time.sleep(1)
                 try:
-                    cur_size = os.path.getsize(src)
-                    if cur_size == prev_size and cur_size > 0:
-                        stable_count += 1
-                        if stable_count >= 2:  # ổn định 2 lần liên tiếp
-                            break
+                    sz = os.path.getsize(src)
+                    if sz == prev_size and sz > 0:
+                        stable += 1
+                        if stable >= 2: break
                     else:
-                        stable_count = 0
-                    prev_size = cur_size
+                        stable = 0
+                    prev_size = sz
+                    if sz > 0:
+                        self.log(f"   📦 File size: {sz//1024//1024} MB...")
                 except: break
 
-            # ── Bước 5: Đổi tên theo thứ tự, đảm bảo không trùng ──
+            # ── Bước 6: Di chuyển + đổi tên ──
             dst = os.path.join(save_dir, filename)
             if os.path.exists(dst):
-                ts = time.strftime("%H%M%S")
-                dst = os.path.join(save_dir, filename.replace(".mp4", f"_{ts}.mp4"))
+                ts  = time.strftime("%H%M%S")
+                dst = dst.replace(".mp4", f"_{ts}.mp4")
 
-            shutil.move(src, dst)
-            size_mb = os.path.getsize(dst) / 1024 / 1024
-            self.log(f"✅ Đã lưu: {os.path.basename(dst)} ({size_mb:.1f} MB)")
-            return True
+            try:
+                shutil.move(src, dst)
+                size_mb = os.path.getsize(dst) / 1024 / 1024
+                self.log(f"✅ Đã lưu: {os.path.basename(dst)} ({size_mb:.1f} MB)")
+                return True
+            except Exception as me:
+                self.log(f"⚠ Di chuyển file lỗi: {me} — file vẫn ở: {src}")
+                return False
 
         except Exception as e:
-            self.log(f"❌ click_download: {e}")
+            self.log(f"❌ click_download lỗi: {e}")
             return False
+
+    def _js_download_fallback(self, save_dir, filename):
+        """Fallback: tìm URL video trong DOM và tải bằng JS fetch / requests."""
+        try:
+            # Tìm các URL video trong DOM
+            video_urls = self.driver.execute_script("""
+                var urls = [];
+                // <video src=...>
+                document.querySelectorAll('video[src]').forEach(v => {
+                    if (v.src && v.src.length > 10) urls.push(v.src);
+                });
+                // <source src=...>
+                document.querySelectorAll('source[src]').forEach(s => {
+                    if (s.src && s.src.includes('mp4')) urls.push(s.src);
+                });
+                // <a href=*.mp4>
+                document.querySelectorAll('a[href]').forEach(a => {
+                    if (a.href && a.href.includes('.mp4')) urls.push(a.href);
+                });
+                return urls;
+            """)
+
+            if not video_urls:
+                return False
+
+            url = video_urls[0]
+            self.log(f"🔗 JS fallback URL: {url[:80]}...")
+
+            if url.startswith("blob:"):
+                # Tải blob qua JS XHR
+                b64 = self.driver.execute_script("""
+                    var url = arguments[0];
+                    var xhr = new XMLHttpRequest();
+                    xhr.open('GET', url, false);
+                    xhr.responseType = 'arraybuffer';
+                    xhr.send();
+                    if (xhr.status !== 200) return null;
+                    var arr = new Uint8Array(xhr.response), bin = '';
+                    for (var i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+                    return btoa(bin);
+                """, url)
+                if b64:
+                    import base64
+                    dst = os.path.join(save_dir, filename)
+                    with open(dst, 'wb') as f:
+                        f.write(base64.b64decode(b64))
+                    sz = os.path.getsize(dst) / 1024 / 1024
+                    self.log(f"✅ JS blob download: {filename} ({sz:.1f} MB)")
+                    return True
+            else:
+                # Tải URL thường bằng requests với cookie browser
+                try:
+                    import urllib.request as _ur
+                    cookies = self.driver.get_cookies()
+                    cookie_str = '; '.join(f"{c['name']}={c['value']}" for c in cookies)
+                    req = _ur.Request(url, headers={
+                        'User-Agent': 'Mozilla/5.0',
+                        'Cookie': cookie_str,
+                        'Referer': self.driver.current_url,
+                    })
+                    dst = os.path.join(save_dir, filename)
+                    with _ur.urlopen(req, timeout=120) as resp, open(dst, 'wb') as f:
+                        f.write(resp.read())
+                    sz = os.path.getsize(dst) / 1024 / 1024
+                    self.log(f"✅ URL download: {filename} ({sz:.1f} MB)")
+                    return True
+                except Exception as ue:
+                    self.log(f"⚠ URL download lỗi: {ue}")
+        except Exception as e:
+            self.log(f"⚠ JS fallback lỗi: {e}")
+        return False
 
     def upload_image(self, image_path):
         """Upload ảnh lên Flow UI mới:
