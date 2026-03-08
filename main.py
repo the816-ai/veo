@@ -2,7 +2,7 @@
 Veo 3 Flow Automation Tool
 Tự động hóa Google Flow để tạo video Veo 3
 """
-import os, sys, time, json, threading, subprocess, shutil, re
+import os, sys, time, json, threading, subprocess, shutil, re, random
 from pathlib import Path
 from tkinter import *
 from tkinter import ttk, filedialog, messagebox, scrolledtext
@@ -337,7 +337,7 @@ class BrowserController:
             except Exception as e2:
                 self.log(f"⚠ JS coordinate click: {e2}")
 
-            return True  # Tiếp tục dù click có thể không thành công
+            return False  # Tất cả fallback đều fail
         except Exception as e:
             self.log(f"❌ click_generate: {e}")
             return False
@@ -583,7 +583,7 @@ class BrowserController:
             except Exception:
                 pass
             time.sleep(3)
-        self.log("⚠ Không thấy ô prompt sau 60s — sẽ tạo project mới")
+        self.log(f"⚠ Không thấy ô prompt sau {timeout}s — sẽ tạo project mới")
         return False
 
     def set_aspect_ratio(self, ratio):
@@ -1111,21 +1111,18 @@ class BrowserController:
         """Tải ảnh từ URL (blob: hoặc https) qua JS."""
         try:
             if img_url.startswith("blob:"):
+                # Dùng sync XHR thay vì Promise (execute_script không await Promise)
                 b64 = self.driver.execute_script("""
-                    var url = arguments[0];
-                    var canvas = document.createElement('canvas');
-                    var img = new Image();
-                    img.crossOrigin = 'anonymous';
-                    return new Promise(function(resolve) {
-                        img.onload = function() {
-                            canvas.width = img.naturalWidth;
-                            canvas.height = img.naturalHeight;
-                            canvas.getContext('2d').drawImage(img, 0, 0);
-                            resolve(canvas.toDataURL('image/png').split(',')[1]);
-                        };
-                        img.onerror = function() { resolve(null); };
-                        img.src = url;
-                    });
+                    try {
+                        var xhr = new XMLHttpRequest();
+                        xhr.open('GET', arguments[0], false);
+                        xhr.responseType = 'arraybuffer';
+                        xhr.send();
+                        if (xhr.status !== 200) return null;
+                        var arr = new Uint8Array(xhr.response), bin = '';
+                        for (var i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+                        return btoa(bin);
+                    } catch(e) { return null; }
                 """, img_url)
                 if b64:
                     import base64
@@ -1574,7 +1571,6 @@ class VeoApp:
     def _t2v_worker(self, lines, out_dir):
         self.running = True
         self.root.after(0, self.tv_progress.start)
-        import random
         results = []
         submitted = []  # [(index, short, fname, project_url)]
 
@@ -1742,7 +1738,6 @@ class VeoApp:
         """Submit tất cả nhanh (30s/prompt), rồi monitor download folder"""
         self.running = True
         self.root.after(0, self.tv_progress.start)
-        import random
 
         # ─── PHASE 1: Submit tất cả prompt nhanh ───
         total = len(lines)
@@ -1944,7 +1939,6 @@ class VeoApp:
     def _t2i_worker(self, lines, out_dir):
         self.running = True
         self.root.after(0, self.ti_progress.start)
-        import random
         results = []
         try:
             for i, prompt in enumerate(lines, 1):
