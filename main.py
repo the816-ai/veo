@@ -1598,13 +1598,24 @@ class VeoApp:
                 self.root.after(0, lambda ii=i, t=total:
                     self.tv_status_lbl.config(text=f"📤 Submit [{ii}/{t}]..."))
 
-                # Tạo project mới cho mỗi prompt (mỗi video riêng biệt)
-                self.log("🆕 Tạo project mới...")
-                ok = self.bc.new_project()
-                if not ok:
-                    results.append((i, short, '❌ Lỗi tạo project', ''))
-                    continue
-                time.sleep(2)
+                # Prompt 1: tạo project mới. Prompt 2+: tái dùng, chỉ dán text
+                if i == 1:
+                    self.log("🆕 Tạo project mới (lần đầu)...")
+                    ok = self.bc.new_project()
+                    if not ok:
+                        results.append((i, short, '❌ Lỗi tạo project', ''))
+                        break
+                    time.sleep(2)
+                else:
+                    self.log(f"♻️ Tái dùng project — chờ ô prompt [{i}/{total}]...")
+                    ready = self.bc.wait_for_prompt_ready(timeout=60)
+                    if not ready:
+                        self.log("⚠ Không thấy ô prompt — tạo project mới...")
+                        ok = self.bc.new_project()
+                        if not ok:
+                            results.append((i, short, '❌ Lỗi tạo project', ''))
+                            continue
+                        time.sleep(2)
 
                 if aspect_ratio and aspect_ratio != "16:9":
                     self.bc.set_aspect_ratio(aspect_ratio)
