@@ -1864,21 +1864,13 @@ class VeoApp:
                         activebackground=CARD, font=("Segoe UI", 9)
                         ).pack(side=LEFT, padx=8)
 
-        # Timeout
-        tf = self._card(f, "⬇️ Chờ ảnh xong → Tự động tải")
+        # Timeout — cố định 5 phút
+        tf = self._card(f, "⬇️ Tự động chờ ảnh xong → Tải về ngay")
         tf.pack(fill=X, padx=12, pady=4)
-        self.ti_timeout = StringVar(value="180")
-        ti_opts = [
-            ("TỰ ĐỘNG — Chờ đến khi xong (tối đa 3 phút)  ⬇️  Tải ngay", "180"),
-            ("Tối đa 2 phút  ⬇️  Tải ngay khi xong", "120"),
-            ("Tối đa 1 phút  ⬇️  Tải ngay khi xong", "60"),
-        ]
-        for txt, val in ti_opts:
-            Radiobutton(tf, text=txt, variable=self.ti_timeout, value=val,
-                        bg=CARD, fg=TEXT, selectcolor=BG,
-                        activebackground=CARD, font=("Segoe UI", 9)
-                        ).pack(anchor=W, padx=12)
-        Label(tf, text="  ℹ️  Tool phát hiện ảnh xong tải ngay, không chờ hết giờ!",
+        self.ti_timeout = StringVar(value="300")
+        Label(tf, text="  ⏳  Chờ đến khi ảnh xong, tối đa 5 phút  →  Tải xuống ngay khi phát hiện hoàn tất",
+              font=("Segoe UI", 9, "bold"), bg=CARD, fg=GREEN).pack(anchor=W, padx=12, pady=6)
+        Label(tf, text="  ℹ️  Tool phát hiện ảnh xong sẽ tải ngay, không cần chờ hết 5 phút!",
               font=("Segoe UI", 8), bg=CARD, fg=MUTED).pack(anchor=W, padx=20, pady=(0, 4))
 
         # Progress
