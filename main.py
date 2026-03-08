@@ -406,6 +406,159 @@ class BrowserController:
         self.log(f"⏱ Timeout {timeout}s — video chưa xong, bỏ qua tải")
         return False
 
+    def wait_and_download(self, save_dir, filename, timeout=300):
+        """Gộp chờ + tải: ngay khi phát hiện nút Tải xuống → click ngay → lưu file.
+        Không cần gọi riêng wait_for_video() + click_download()."""
+        self.log(f"⏳ Chờ video + tự động tải ngay (tối đa {timeout}s)...")
+        os.makedirs(save_dir, exist_ok=True)
+        start    = time.time()
+        last_log = 0
+
+        # Set CDP download folder ngay từ đầu
+        try:
+            self.driver.execute_cdp_cmd(
+                "Browser.setDownloadBehavior",
+                {"behavior": "allow", "downloadPath": save_dir}
+            )
+        except: pass
+
+        # Snapshot thư mục trước khi click
+        chrome_dl  = str(Path.home() / "Downloads")
+        watch_dirs = list({save_dir, chrome_dl})
+        snap = {d: set(os.listdir(d)) if os.path.exists(d) else set()
+                for d in watch_dirs}
+
+        DL_XPATHS = [
+            "//button[normalize-space(.)='Tải xuống']",
+            "//button[normalize-space(.)='Download']",
+            "//button[@aria-label='Tải xuống' or @aria-label='Download']",
+            "//button[contains(.,'Tải xuống') or contains(.,'Download')]",
+            "//a[contains(@href,'.mp4') and @download]",
+            "//button[.//mat-icon[contains(.,'download')]]",
+        ]
+
+        dl_btn = None
+        while time.time() - start < timeout:
+            time.sleep(6)
+            elapsed = int(time.time() - start)
+
+            try:
+                # Tìm nút Tải xuống → thoát vòng lặp ngay
+                for xpath in DL_XPATHS:
+                    try:
+                        btns = self.driver.find_elements(By.XPATH, xpath)
+                        vis  = [b for b in btns if b.is_displayed()]
+                        if vis:
+                            dl_btn = vis[0]
+                            break
+                    except: continue
+
+                if dl_btn:
+                    self.log(f"🎉 Video xong sau {elapsed}s! Click tải ngay...")
+                    break
+
+                # Fallback: video element có src → thử JS download
+                try:
+                    vids = self.driver.find_elements(By.TAG_NAME, "video")
+                    for v in vids:
+                        src = v.get_attribute("src") or ""
+                        if src and not src.startswith("data:") and len(src) > 10:
+                            self.log(f"📹 Video element ready ({elapsed}s) — thử JS download...")
+                            if self._js_download_fallback(save_dir, filename):
+                                return True
+                            break
+                except: pass
+
+                # Log tiến độ mỗi 30s
+                if elapsed - last_log >= 30:
+                    pct = min(95, int(elapsed / timeout * 100))
+                    self.log(f"   ⏳ {elapsed}s/{timeout}s (~{pct}%) — đang render...")
+                    last_log = elapsed
+
+            except Exception: pass
+
+        if not dl_btn:
+            self.log(f"⏱ Timeout — thử JS download fallback...")
+            return self._js_download_fallback(save_dir, filename)
+
+        # ── Click nút (3 cách) ──
+        clicked = False
+        for attempt in range(3):
+            try:
+                if attempt == 0:
+                    ActionChains(self.driver).move_to_element(dl_btn).click().perform()
+                elif attempt == 1:
+                    self.driver.execute_script("arguments[0].click();", dl_btn)
+                else:
+                    dl_btn.click()
+                self.log(f"⬇️ Đã click tải xuống (cách {attempt+1})")
+                clicked = True
+                break
+            except Exception as ce:
+                self.log(f"   ⚠ Click lần {attempt+1}: {ce}")
+                time.sleep(0.5)
+
+        if not clicked:
+            self.log("⚠ Không click được — thử JS fallback...")
+            return self._js_download_fallback(save_dir, filename)
+
+        # ── Chờ file xuất hiện (180s) ──
+        deadline    = time.time() + 180
+        new_file    = None
+        new_dir     = save_dir
+        last_sz_log = time.time()
+
+        while time.time() < deadline:
+            time.sleep(2)
+            for d in watch_dirs:
+                if not os.path.exists(d): continue
+                current = set(os.listdir(d))
+                added   = current - snap[d]
+                done    = [f for f in added
+                           if f.lower().endswith(".mp4")
+                           and not f.endswith(".crdownload")]
+                if done:
+                    new_file = done[0]; new_dir = d; break
+                partial = [f for f in added if f.endswith(".crdownload")]
+                if partial and time.time() - last_sz_log > 8:
+                    try:
+                        sz = os.path.getsize(os.path.join(d, partial[0]))
+                        self.log(f"   ⬇️ Đang tải: {sz//1024//1024} MB...")
+                    except: pass
+                    last_sz_log = time.time()
+            if new_file: break
+
+        if not new_file:
+            self.log("⚠ File không xuất hiện sau 180s")
+            return False
+
+        # ── Chờ ổn định → đổi tên ──
+        src = os.path.join(new_dir, new_file)
+        prev = -1; stable = 0
+        for _ in range(20):
+            time.sleep(1)
+            try:
+                sz = os.path.getsize(src)
+                if sz == prev and sz > 0:
+                    stable += 1
+                    if stable >= 2: break
+                else: stable = 0
+                prev = sz
+            except: break
+
+        dst = os.path.join(save_dir, filename)
+        if os.path.exists(dst):
+            ts  = time.strftime("%H%M%S")
+            dst = dst.replace(".mp4", f"_{ts}.mp4")
+        try:
+            shutil.move(src, dst)
+            mb = os.path.getsize(dst) / 1024 / 1024
+            self.log(f"✅ Đã lưu: {os.path.basename(dst)} ({mb:.1f} MB)")
+            return True
+        except Exception as me:
+            self.log(f"⚠ Di chuyển file lỗi: {me} — file vẫn ở: {src}")
+            return False
+
     def wait_for_prompt_ready(self, timeout=60):
         """Chờ ô nhập prompt xuất hiện lại sau khi video xong.
         Dùng để dán prompt tiếp mà không cần tạo project mới."""
@@ -1255,19 +1408,8 @@ class VeoApp:
                 ok = self.bc.click_generate()
                 if not ok: continue
 
-                ok = self.bc.wait_for_video(timeout=int(self.tv_timeout.get()))
-                if ok:
-                    fname = f"{self.tv_base.get()}_{i:02d}.mp4"
-                    try:
-                        self.bc.driver.execute_cdp_cmd(
-                            "Browser.setDownloadBehavior",
-                            {"behavior": "allow", "downloadPath": out_dir}
-                        )
-                    except:
-                        pass
-                    self.bc.click_download(out_dir, fname)
-                else:
-                    self.log(f"   ⏭ Bỏ qua tải — chuyển prompt tiếp")
+                fname = f"{self.tv_base.get()}_{i:02d}.mp4"
+                self.bc.wait_and_download(out_dir, fname, timeout=int(self.tv_timeout.get()))
 
                 if i < len(lines):
                     self.log(f"⏳ Chờ {delay}s rồi prompt tiếp...")
@@ -1727,22 +1869,22 @@ class VeoApp:
                 ok = self.bc.click_generate()
                 if not ok: continue
 
-                ok = self.bc.wait_for_video(timeout=int(self.cv_timeout.get()))
                 fname = f"{self.cv_base.get()}_{i:02d}.mp4"
+                self.root.after(0, lambda fi=fname: self.cv_status_lbl.config(
+                    text=f"⬇️ Chờ + tải {fi}..."))
+                ok = self.bc.wait_and_download(out_dir, fname, timeout=int(self.cv_timeout.get()))
                 if ok:
-                    self.log(f"   ⬇️ Tải về: {fname}")
-                    self.root.after(0, lambda fi=fname: self.cv_status_lbl.config(
-                        text=f"⬇️ Đang tải {fi}..."))
-                    self.bc.click_download(out_dir, fname)
                     self.root.after(0, lambda fi=fname: self.cv_status_lbl.config(
                         text=f"✅ Tải xong: {fi}"))
                 else:
-                    self.log(f"   ⏭ Bỏ qua tải — hết timeout ({self.cv_timeout.get()}s)")
+                    self.root.after(0, lambda fi=fname: self.cv_status_lbl.config(
+                        text=f"⏭ Bỏ qua: {fi}"))
 
                 d = delay_map.get(self.cv_delay.get(), 5)
                 d = d if d else random.randint(6, 15)
-                self.log(f"⏳ Chờ {d}s rồi sang prompt tiếp...")
-                time.sleep(d)
+                if i < len(prompts):
+                    self.log(f"⏳ Chờ {d}s rồi sang prompt tiếp...")
+                    time.sleep(d)
         finally:
             self.running = False
             self.root.after(0, self.cv_progress.stop)
