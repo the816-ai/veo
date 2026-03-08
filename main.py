@@ -1575,8 +1575,21 @@ class VeoApp:
         self.running = True
         self.root.after(0, self.tv_progress.start)
         import random
-        results = []  # [(index, prompt_short, status, filename_or_error)]
+        results = []
+        submitted = []  # [(index, short, fname, project_url)]
+
         try:
+            # ════════════════════════════════════════════
+            # PHASE 1: Submit tất cả prompt nhanh
+            # ════════════════════════════════════════════
+            total = len(lines)
+            self.log(f"\n{'═'*60}")
+            self.log(f"📤  PHASE 1 — Submit {total} prompt(s)")
+            self.log(f"{'═'*60}")
+
+            delay_map = {"normal": 5, "double": 10, "random": None}
+            d_val = delay_map.get(self.tv_delay.get(), 5)
+
             for i, line in enumerate(lines, 1):
                 if not self.running:
                     results.append((i, line[:50], '⏹ Dừng', ''))
@@ -1584,60 +1597,85 @@ class VeoApp:
 
                 prompt_text, aspect_ratio, duration, meta = self._parse_line(line)
                 short = prompt_text[:60]
-                self.log(f"\n══ [{i}/{len(lines)}] {short}...")
-                if meta:
-                    self.log(f"   📌 Ratio: {aspect_ratio} | Duration: {duration}s")
+                fname = f"{self.tv_base.get()}_{i:02d}.mp4"
+                self.log(f"\n📤 [{i}/{total}] {short}...")
+                self.root.after(0, lambda ii=i, t=total:
+                    self.tv_status_lbl.config(text=f"📤 Submit [{ii}/{t}]..."))
 
-                delay_map = {"normal": 5, "double": 10, "random": None}
-                d_val = delay_map.get(self.tv_delay.get(), 5)
-                delay = d_val if d_val is not None else random.randint(6, 15)
-
-                # Tạo / tái dùng project
-                if i == 1:
-                    self.log("🆕 Tạo project mới...")
-                    ok = self.bc.new_project()
-                    if not ok:
-                        self.log(f"❌ #{i} Lỗi: Không tạo được project")
-                        results.append((i, short, '❌ Lỗi tạo project', ''))
-                        break
-                    time.sleep(2)
-                else:
-                    self.log(f"♻️ Tái dùng project [{i}/{len(lines)}]...")
-                    ready = self.bc.wait_for_prompt_ready(timeout=60)
-                    if not ready:
-                        self.log("⚠ Tạo project mới (fallback)...")
-                        ok = self.bc.new_project()
-                        if not ok:
-                            results.append((i, short, '❌ Lỗi tạo project', ''))
-                            continue
-                        time.sleep(2)
+                # Tạo project mới cho mỗi prompt (mỗi video riêng biệt)
+                self.log("🆕 Tạo project mới...")
+                ok = self.bc.new_project()
+                if not ok:
+                    results.append((i, short, '❌ Lỗi tạo project', ''))
+                    continue
+                time.sleep(2)
 
                 if aspect_ratio and aspect_ratio != "16:9":
                     self.bc.set_aspect_ratio(aspect_ratio)
 
                 ok = self.bc.set_prompt(prompt_text)
                 if not ok:
-                    self.log(f"❌ #{i} Lỗi: Không dán được prompt")
                     results.append((i, short, '❌ Lỗi dán prompt', ''))
                     continue
                 time.sleep(0.8)
 
                 ok = self.bc.click_generate()
                 if not ok:
-                    self.log(f"❌ #{i} Lỗi: Không click được nút Tạo")
                     results.append((i, short, '❌ Lỗi nút Tạo', ''))
                     continue
 
-                fname = f"{self.tv_base.get()}_{i:02d}.mp4"
-                dl_ok = self.bc.wait_and_download(out_dir, fname, timeout=int(self.tv_timeout.get()))
+                # Lưu URL project để quay lại tải
+                proj_url = self.bc.driver.current_url
+                submitted.append((i, short, fname, proj_url))
+                self.log(f"   ✅ Đã submit #{i} — URL: {proj_url[:80]}")
+
+                # Delay giữa các prompt
+                if i < total and self.running:
+                    delay = d_val if d_val is not None else random.randint(6, 15)
+                    self.log(f"   ⏳ Chờ {delay}s rồi prompt tiếp...")
+                    time.sleep(delay)
+
+            self.log(f"\n📤 Phase 1 xong: {len(submitted)}/{total} prompt đã submit")
+
+            if not submitted:
+                self.log("⚠ Không có prompt nào submit được")
+                return
+
+            # ════════════════════════════════════════════
+            # PHASE 2: Quay lại tải từng video theo thứ tự
+            # ════════════════════════════════════════════
+            self.log(f"\n{'═'*60}")
+            self.log(f"⬇️  PHASE 2 — Tải {len(submitted)} video theo thứ tự")
+            self.log(f"{'═'*60}")
+
+            for idx, (i, short, fname, proj_url) in enumerate(submitted, 1):
+                if not self.running:
+                    results.append((i, short, '⏹ Dừng tải', ''))
+                    break
+
+                self.log(f"\n⬇️ [{idx}/{len(submitted)}] Quay lại: {short}...")
+                self.root.after(0, lambda ii=idx, t=len(submitted), fn=fname:
+                    self.tv_status_lbl.config(text=f"⬇️ Tải [{ii}/{t}] {fn}..."))
+
+                # Mở lại URL project
+                try:
+                    self.bc.driver.get(proj_url)
+                    time.sleep(3)
+                except Exception as e:
+                    self.log(f"   ❌ Không mở được URL: {e}")
+                    results.append((i, short, '❌ Lỗi mở URL project', ''))
+                    continue
+
+                # Chờ video xong + tải ngay
+                dl_ok = self.bc.wait_and_download(out_dir, fname,
+                    timeout=int(self.tv_timeout.get()))
                 if dl_ok:
                     results.append((i, short, '✅ Thành công', fname))
+                    self.log(f"   ✅ Tải xong: {fname}")
                 else:
-                    results.append((i, short, '⚠ Tạo xong nhưng không tải được', fname))
+                    results.append((i, short, '⚠ Không tải được', fname))
+                    self.log(f"   ⚠ Không tải được: {fname}")
 
-                if i < len(lines):
-                    self.log(f"⏳ Chờ {delay}s rồi prompt tiếp...")
-                    time.sleep(delay)
         except Exception as e:
             self.log(f"❌ Lỗi ngoài dự kiến: {e}")
         finally:
@@ -2241,13 +2279,28 @@ class VeoApp:
         delay_map = {"normal": 5, "double": 10, "random": None}
         chars = list(self.characters.items())
         results = []
+        submitted = []  # [(index, short, fname, project_url)]
+
         try:
+            # ════════════════════════════════════════════
+            # PHASE 1: Submit tất cả prompt nhanh
+            # ════════════════════════════════════════════
+            total = len(prompts)
+            self.log(f"\n{'═'*60}")
+            self.log(f"📤  PHASE 1 — Submit {total} prompt(s) + upload nhân vật")
+            self.log(f"{'═'*60}")
+
+            d_val = delay_map.get(self.cv_delay.get(), 5)
+
             for i, prompt in enumerate(prompts, 1):
                 if not self.running:
                     results.append((i, prompt[:50], '⏹ Dừng', ''))
                     break
                 short = prompt[:50]
-                self.log(f"\n══ [{i}/{len(prompts)}] {short}...")
+                fname = f"{self.cv_base.get()}_{i:02d}.mp4"
+                self.log(f"\n📤 [{i}/{total}] {short}...")
+                self.root.after(0, lambda ii=i, t=total:
+                    self.cv_status_lbl.config(text=f"📤 Submit [{ii}/{t}]..."))
 
                 detected = [(n, p) for n, p in chars if n.lower() in prompt.lower()]
                 to_upload = detected if detected else chars
@@ -2260,13 +2313,13 @@ class VeoApp:
                     continue
                 time.sleep(2)
 
-                # Upload ảnh nhân vật trước khi nhập prompt
+                # Upload ảnh nhân vật
                 for name, img_path in to_upload:
                     self.log(f"   📤 Upload ảnh {name}...")
                     self.bc.upload_image(img_path)
                     time.sleep(0.5)
 
-                # Đóng panel media nếu đang mở (nhấn Escape)
+                # Đóng panel media
                 try:
                     from selenium.webdriver.common.keys import Keys
                     self.bc.driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.ESCAPE)
@@ -2284,24 +2337,54 @@ class VeoApp:
                     results.append((i, short, '❌ Lỗi nút Tạo', ''))
                     continue
 
-                fname = f"{self.cv_base.get()}_{i:02d}.mp4"
-                self.root.after(0, lambda fi=fname: self.cv_status_lbl.config(
-                    text=f"⬇️ Chờ + tải {fi}..."))
-                dl_ok = self.bc.wait_and_download(out_dir, fname, timeout=int(self.cv_timeout.get()))
-                if dl_ok:
-                    results.append((i, prompt[:50], '✅ Thành công', fname))
-                    self.root.after(0, lambda fi=fname: self.cv_status_lbl.config(
-                        text=f"✅ Tải xong: {fi}"))
-                else:
-                    results.append((i, prompt[:50], '⚠ Không tải được', fname))
-                    self.root.after(0, lambda fi=fname: self.cv_status_lbl.config(
-                        text=f"⏭ Bỏ qua: {fi}"))
+                proj_url = self.bc.driver.current_url
+                submitted.append((i, short, fname, proj_url))
+                self.log(f"   ✅ Đã submit #{i}")
 
-                d = delay_map.get(self.cv_delay.get(), 5)
-                d = d if d else random.randint(6, 15)
-                if i < len(prompts):
-                    self.log(f"⏳ Chờ {d}s rồi sang prompt tiếp...")
-                    time.sleep(d)
+                if i < total and self.running:
+                    delay = d_val if d_val is not None else random.randint(6, 15)
+                    self.log(f"   ⏳ Chờ {delay}s...")
+                    time.sleep(delay)
+
+            self.log(f"\n📤 Phase 1 xong: {len(submitted)}/{total} prompt đã submit")
+
+            if not submitted:
+                return
+
+            # ════════════════════════════════════════════
+            # PHASE 2: Quay lại tải từng video theo thứ tự
+            # ════════════════════════════════════════════
+            self.log(f"\n{'═'*60}")
+            self.log(f"⬇️  PHASE 2 — Tải {len(submitted)} video theo thứ tự")
+            self.log(f"{'═'*60}")
+
+            for idx, (i, short, fname, proj_url) in enumerate(submitted, 1):
+                if not self.running:
+                    results.append((i, short, '⏹ Dừng tải', ''))
+                    break
+
+                self.log(f"\n⬇️ [{idx}/{len(submitted)}] Quay lại: {short}...")
+                self.root.after(0, lambda ii=idx, t=len(submitted), fn=fname:
+                    self.cv_status_lbl.config(text=f"⬇️ Tải [{ii}/{t}] {fn}..."))
+
+                try:
+                    self.bc.driver.get(proj_url)
+                    time.sleep(3)
+                except Exception as e:
+                    results.append((i, short, '❌ Lỗi mở URL', ''))
+                    continue
+
+                dl_ok = self.bc.wait_and_download(out_dir, fname,
+                    timeout=int(self.cv_timeout.get()))
+                if dl_ok:
+                    results.append((i, short, '✅ Thành công', fname))
+                    self.root.after(0, lambda fn=fname: self.cv_status_lbl.config(
+                        text=f"✅ Tải xong: {fn}"))
+                else:
+                    results.append((i, short, '⚠ Không tải được', fname))
+                    self.root.after(0, lambda fn=fname: self.cv_status_lbl.config(
+                        text=f"⏭ Bỏ qua: {fn}"))
+
         except Exception as e:
             self.log(f"❌ Lỗi ngoài dự kiến: {e}")
         finally:
