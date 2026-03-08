@@ -992,7 +992,7 @@ class BrowserController:
 
     def get_download_ready_count(self):
         """Đếm số video đã render xong (có nút Tải xuống) trên trang.
-        Dùng cho pipeline watcher."""
+        Dùng cho dom watcher."""
         try:
             btns = self.driver.find_elements(
                 By.XPATH,
@@ -1762,7 +1762,7 @@ class VeoApp:
                                font=("Segoe UI",9), bg=BG, fg=MUTED)
         self.gm_status.pack(pady=(0,8))
 
-        # ── TẠO ẢNH NANO BANANA 2 — BATCH PIPELINE ──────────────────────────
+        # ── TẠO ẢNH NANO BANANA 2 — BATCH ──────────────────────────
         img_card = self._card(f, "🎨 Tạo ảnh Nano Banana 2 (Google Flow — miễn phí!)")
         img_card.pack(fill=X, padx=12, pady=(4, 10))
 
@@ -1905,7 +1905,7 @@ class VeoApp:
 
     def _img_batch_run(self, prompts, count, orient, delay, timeout, out_dir):
         """
-        Tạo ảnh Nano Banana 2 trên Google Flow — pipeline tuần tự.
+        Tạo ảnh Nano Banana 2 trên Google Flow — tuần tự (batch).
         Mỗi prompt: nhập → generate → chờ ảnh → tải về → 10s → prompt tiếp.
         """
         os.makedirs(out_dir, exist_ok=True)
@@ -3627,7 +3627,8 @@ class VeoApp:
 
         # Header
         hf = Frame(f, bg="#0A0F1A"); hf.pack(fill=X)
-        Label(hf, text="🎬  GHÉP VIDEO — PIPELINE BATCH",
+        Label(hf, text="🎬  GHÉP VIDEO — BATCH QUEUE",
+
               font=("Segoe UI", 12, "bold"), bg="#0A0F1A", fg=ACCENT
               ).pack(anchor=W, padx=16, pady=10)
         Label(hf, text="Yêu cầu: FFmpeg đã cài trong PATH  |  Thêm nhiều job → chạy tuần tự nền",
@@ -3673,7 +3674,7 @@ class VeoApp:
 
         # ── Nút chạy ──
         bf = Frame(f, bg=BG); bf.pack(fill=X, padx=12, pady=8)
-        self._btn(bf, "  ▶  CHẠY TẤT CẢ JOB  (Pipeline)",
+        self._btn(bf, "  ▶  CHẠY TẤT CẢ JOB  (Batch)",
                   self._mg_run_all, color=GREEN
                   ).pack(side=LEFT, fill=X, expand=True, ipady=9, padx=(0,4))
         self._btn(bf, "  ⏹  STOP", self._mg_stop, color=RED
@@ -3718,7 +3719,8 @@ class VeoApp:
         self.log("⏹ Đã gửi lệnh dừng batch merge")
 
     def _mg_run_all(self):
-        """Chạy toàn bộ queue ghép video theo pipeline (tuần tự, chạy nền)."""
+        """Chạy toàn bộ queue ghép video (tuần tự, chạy nền)."""
+
         if self._mg_running:
             messagebox.showwarning("Đang chạy", "Batch merge đang chạy! Nhấn STOP trước.")
             return
