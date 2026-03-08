@@ -2280,7 +2280,6 @@ class VeoApp:
     def _create_video_worker(self, prompts, out_dir):
         self.running = True
         self.root.after(0, self.cv_progress.start)
-        import random
         delay_map = {"normal": 5, "double": 10, "random": None}
         chars = list(self.characters.items())
         results = []
@@ -2312,11 +2311,24 @@ class VeoApp:
                 if to_upload:
                     self.log(f"   👤 Nhân vật: {[n for n,_ in to_upload]}")
 
-                ok = self.bc.new_project()
-                if not ok:
-                    results.append((i, short, '❌ Lỗi tạo project', ''))
-                    continue
-                time.sleep(2)
+                # Prompt 1: tạo project mới. Prompt 2+: tái dùng
+                if i == 1:
+                    self.log("🆕 Tạo project mới (lần đầu)...")
+                    ok = self.bc.new_project()
+                    if not ok:
+                        results.append((i, short, '❌ Lỗi tạo project', ''))
+                        break
+                    time.sleep(2)
+                else:
+                    self.log(f"♻️ Tái dùng project — chờ ô prompt [{i}/{total}]...")
+                    ready = self.bc.wait_for_prompt_ready(timeout=60)
+                    if not ready:
+                        self.log("⚠ Không thấy ô prompt — tạo project mới...")
+                        ok = self.bc.new_project()
+                        if not ok:
+                            results.append((i, short, '❌ Lỗi tạo project', ''))
+                            continue
+                        time.sleep(2)
 
                 # Upload ảnh nhân vật
                 for name, img_path in to_upload:
