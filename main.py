@@ -406,6 +406,31 @@ class BrowserController:
         self.log(f"⏱ Timeout {timeout}s — video chưa xong, bỏ qua tải")
         return False
 
+    def wait_for_prompt_ready(self, timeout=60):
+        """Chờ ô nhập prompt xuất hiện lại sau khi video xong.
+        Dùng để dán prompt tiếp mà không cần tạo project mới."""
+        self.log("⏳ Chờ ô nhập prompt sẵn sàng...")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                for sel in [
+                    "div[role='textbox']",
+                    "div[contenteditable='true']",
+                    "textarea",
+                ]:
+                    els = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                    for el in els:
+                        if el.is_displayed():
+                            # Kiểm tra ô trống hoặc đã reset
+                            txt = (el.get_attribute("innerText") or "").strip()
+                            if len(txt) < 20:  # ô gần như trống = sẵn sàng
+                                self.log("✅ Ô prompt sẵn sàng!")
+                                return True
+            except Exception:
+                pass
+            time.sleep(3)
+        self.log("⚠ Không thấy ô prompt sau 60s — sẽ tạo project mới")
+        return False
 
     def set_aspect_ratio(self, ratio):
         """Chọn tỷ lệ khung hình trên Flow: 16:9 | 9:16 | 1:1"""
@@ -1202,9 +1227,22 @@ class VeoApp:
                 d_val = delay_map.get(self.tv_delay.get(), 5)
                 delay = d_val if d_val is not None else random.randint(6, 15)
 
-                ok = self.bc.new_project()
-                if not ok: continue
-                time.sleep(2)
+                # ── Lần đầu: tạo project mới. Từ lần 2+: chờ ô prompt rồi dán thẳng ──
+                if i == 1:
+                    self.log("🆕 Tạo project mới (lần đầu)...")
+                    ok = self.bc.new_project()
+                    if not ok:
+                        self.log("❌ Không tạo được project — dừng")
+                        break
+                    time.sleep(2)
+                else:
+                    self.log(f"♻️ Tái dùng project — chờ ô prompt [{i}/{len(lines)}]...")
+                    ready = self.bc.wait_for_prompt_ready(timeout=60)
+                    if not ready:
+                        self.log("⚠ Không thấy ô prompt — tạo project mới...")
+                        ok = self.bc.new_project()
+                        if not ok: continue
+                        time.sleep(2)
 
                 # Set tỷ lệ nếu có trong JSON
                 if aspect_ratio and aspect_ratio != "16:9":
@@ -1220,7 +1258,6 @@ class VeoApp:
                 ok = self.bc.wait_for_video(timeout=int(self.tv_timeout.get()))
                 if ok:
                     fname = f"{self.tv_base.get()}_{i:02d}.mp4"
-                    # Cập nhật thư mục tải về via CDP (đảm bảo đúng folder)
                     try:
                         self.bc.driver.execute_cdp_cmd(
                             "Browser.setDownloadBehavior",
@@ -1232,8 +1269,9 @@ class VeoApp:
                 else:
                     self.log(f"   ⏭ Bỏ qua tải — chuyển prompt tiếp")
 
-                self.log(f"⏳ Chờ {delay}s trước prompt tiếp...")
-                time.sleep(delay)
+                if i < len(lines):
+                    self.log(f"⏳ Chờ {delay}s rồi prompt tiếp...")
+                    time.sleep(delay)
         finally:
             self.running = False
             self.root.after(0, self.tv_progress.stop)
@@ -1281,8 +1319,20 @@ class VeoApp:
                 self.root.after(0, lambda i=i, t=total: self.tv_status_lbl.config(
                     text=f"⚡ Submit {i}/{t} — render song song trên cloud..."))
 
-                ok = self.bc.new_project()
-                if not ok: continue
+                # ── Lần đầu: tạo project mới. Từ lần 2+: chờ ô prompt rồi dán thẳng ──
+                if i == 1:
+                    self.log("🆕 Tạo project mới (lần đầu)...")
+                    ok = self.bc.new_project()
+                    if not ok:
+                        self.log("❌ Không tạo được project — dừng")
+                        break
+                else:
+                    self.log(f"♻️ Tái dùng project — chờ ô prompt [{i}/{total}]...")
+                    ready = self.bc.wait_for_prompt_ready(timeout=45)
+                    if not ready:
+                        self.log("⚠ Không thấy ô prompt — tạo project mới...")
+                        ok = self.bc.new_project()
+                        if not ok: continue
 
                 if aspect_ratio and aspect_ratio != "16:9":
                     self.bc.set_aspect_ratio(aspect_ratio)
