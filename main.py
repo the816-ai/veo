@@ -2732,7 +2732,7 @@ class VeoApp:
         self._btn(btn_row, "  ▶  START — Tuần tự + Tải về",
                   self._start_text2video, color=GREEN
                   ).pack(side=LEFT, fill=X, expand=True, ipady=9, padx=(0,4))
-        self._btn(btn_row, "  ⚡  PIPELINE — Submit + tải nền song song",
+        self._btn(btn_row, "  ⚡  RAPID — Submit nhanh, render song song",
                   self._start_rapid, color=ORANGE
                   ).pack(side=LEFT, fill=X, expand=True, ipady=9, padx=(0,4))
         self._btn(btn_row, "  ⏹  STOP",
@@ -2985,138 +2985,118 @@ class VeoApp:
             return
         out_dir = self.tv_out.get()
         os.makedirs(out_dir, exist_ok=True)
-        self.log(f"⚡ PIPELINE MODE [{mode}]: Submit {len(parsed)} prompt(s) pipeline (submit + watcher)!")
-        self._go_logs()
+        self.log(f"⚡ RAPID MODE [{mode}]: Submit {len(parsed)} prompt(s) nhanh → render song song!")
+        self.nb.select(5)
         self._run_bg(lambda: self._rapid_worker(parsed, out_dir))
 
-    def _pipeline_worker(self, lines, out_dir):
-        """
-        PIPELINE MODE:
-          Thread 1 (main): paste prompt → generate → delay → paste tiếp (không chờ video)
-          Thread 2 (watcher): cứ 2s scan DOM, phát hiện nút "Tải xuống" mới → tự download
-        """
+    def _rapid_worker(self, lines, out_dir):
+        """Submit tất cả nhanh (30s/prompt), rồi monitor download folder"""
         self.running = True
         self.root.after(0, self.tv_progress.start)
-        import random, threading
+        import random
 
-        total      = len(lines)
-        base_name  = self.tv_base.get()
-        submitted  = 0
-        dl_counter = [1]           # shared counter, protected by lock
-        dl_lock    = threading.Lock()
-        watcher_stop = threading.Event()
-
-        self.log(f"\n🚀 PIPELINE MODE: {total} prompt(s) — submit + download song song")
-
-        # ─── WATCHER THREAD ────────────────────────────────────────────────
-        def dom_watcher():
-            """Chạy nền: 2s/lần, phát hiện nút Tải xuống mới → auto download."""
-            last_dl_count = 0
-            self.log("   👁 DOM Watcher đã khởi động — đang theo dõi...")
-            while not watcher_stop.is_set():
-                try:
-                    current_count = self.bc.get_download_ready_count()
-                    if current_count > last_dl_count:
-                        new_videos = current_count - last_dl_count
-                        self.log(f"   🔔 Watcher: phát hiện {new_videos} video mới sẵn sàng tải!")
-                        with dl_lock:
-                            idx = dl_counter[0]
-                        downloaded = self.bc.click_all_downloads(
-                            out_dir, base_name, start_index=idx
-                        )
-                        with dl_lock:
-                            dl_counter[0] += downloaded
-                        last_dl_count = self.bc.get_download_ready_count()
-                        self.root.after(0, lambda d=dl_counter[0]-1, t=total:
-                            self.tv_status_lbl.config(
-                                text=f"📥 Đã tải {d}/{t} video"))
-                except Exception as e:
-                    pass  # Watcher không được crash
-                # Chờ 2s, nhưng check stop event mỗi 0.5s để dừng nhanh
-                for _ in range(4):
-                    if watcher_stop.is_set(): break
-                    time.sleep(0.5)
-
-        watcher_thread = threading.Thread(target=dom_watcher, daemon=True)
-        watcher_thread.start()
-
-        # ─── MAIN LOOP: Submit nhanh ────────────────────────────────────────
+        # ─── PHASE 1: Submit tất cả prompt nhanh ───
+        total = len(lines)
+        submitted = 0
         try:
-            delay_map = {"normal": 8, "double": 15, "random": None}
-            d_val = delay_map.get(self.tv_delay.get(), 8)
-
             for i, item in enumerate(lines, 1):
                 if not self.running: break
                 prompt_text, aspect_ratio, duration, meta = item
                 if not prompt_text:
-                    self.log(f"   ⚠ Prompt #{i} rỗng — bỏ qua")
+                    self.log(f"   ⚠ Prompt rỗng tại vị trí {i} — bỏ qua")
                     continue
+                self.log(f"\n⚡ [{i}/{total}] Submit: {prompt_text[:60]}...")
+                self.root.after(0, lambda i=i, t=total: self.tv_status_lbl.config(
+                    text=f"⚡ Submit {i}/{t} — render song song trên cloud..."))
 
-                self.log(f"\n⚡ [{i}/{total}] Submit: {prompt_text[:65]}...")
-                self.root.after(0, lambda i=i, t=total:
-                    self.tv_status_lbl.config(
-                        text=f"⚡ Submit {i}/{t} — watcher đang tải về nền..."))
-
-                # Tạo project chỉ lần đầu
+                # Bug 11 fixed: chỉ tạo project MỚI cho prompt đầu tiên
+                # Các prompt tiếp theo tái dùng project (nhanh hơn nhiều)
                 if i == 1:
                     ok = self.bc.new_project()
-                    if not ok:
-                        self.log("❌ Không tạo được project — dừng pipeline")
-                        break
-                    self.log("🆕 Project đã tạo")
+                    if not ok: continue
+                    self.log("🆕 Đã tạo project mới cho RAPID mode")
                 else:
-                    # Chờ ô prompt sẵn sàng (≤20s)
-                    self.bc.wait_for_prompt_ready(timeout=20)
+                    ready = self.bc.wait_for_prompt_ready(timeout=20)
+                    if not ready:
+                        self.log(f"   ⚠ Prompt chưa sẵn sàng, thử submit vẫn")
 
                 if aspect_ratio and aspect_ratio != "16:9":
                     self.bc.set_aspect_ratio(aspect_ratio)
 
                 ok = self.bc.set_prompt(prompt_text)
-                if not ok:
-                    self.log(f"   ⚠ Dán prompt #{i} thất bại — bỏ qua")
-                    continue
+                if not ok: continue
 
                 ok = self.bc.click_generate()
                 if ok:
                     submitted += 1
-                    self.log(f"   ✅ Submit #{i} thành công")
+                    self.log(f"   ✅ Đã submit #{i}")
                 else:
                     self.log(f"   ⚠ Submit #{i} thất bại")
 
+                # Chờ 30s giữa các prompt (đủ để Flow nhận request)
                 if i < total and self.running:
-                    delay = d_val if d_val is not None else random.randint(6, 15)
-                    self.log(f"   ⏳ Chờ {delay}s rồi submit tiếp...")
-                    # Chờ theo từng giây để có thể dừng sớm
-                    for _ in range(delay):
+                    for _ in range(30):
                         if not self.running: break
                         time.sleep(1)
 
         except Exception as e:
-            self.log(f"❌ Pipeline submit error: {e}")
+            self.log(f"❌ Submit error: {e}")
 
-        self.log(f"\n✅ Submit xong {submitted}/{total} prompt — watcher đang tải nốt...")
-
-        # ─── Chờ watcher tải hết (tối đa 10 phút sau prompt cuối) ──────────
+        self.log(f"\n⚡ Đã submit {submitted}/{total} prompt. Bắt đầu monitor download...")
         self.root.after(0, lambda: self.tv_status_lbl.config(
-            text=f"📥 Đang tải video cuối cùng..."))
-        wait_deadline = time.time() + 600
-        while time.time() < wait_deadline and self.running:
-            with dl_lock:
-                done = dl_counter[0] - 1
-            if done >= submitted:
-                break
+            text=f"📥 Đang chờ {submitted} video từ cloud..."))
+
+        # ─── PHASE 2: Monitor folder, đổi tên tuần tự khi file về ───
+        if submitted == 0:
+            self.running = False
+            self.root.after(0, self.tv_progress.stop)
+            return
+
+        # Bug 5 fixed: Chrome tải về ~/Downloads, phải monitor cả 2 folder
+        chrome_dl = str(Path.home() / "Downloads")
+        monitor_dirs = list({out_dir, chrome_dl})
+        snap = {d: set(os.listdir(d)) if os.path.exists(d) else set() for d in monitor_dirs}
+        base = self.tv_base.get()
+        video_counter = 1
+        # Tính video_counter tiếp theo (tránh ghi đè file cũ)
+        while os.path.exists(os.path.join(out_dir, f"{base}_{video_counter:02d}.mp4")):
+            video_counter += 1
+
+        deadline = time.time() + submitted * 600  # 10 phút/video tối đa
+        found = 0
+        prev_size_map = {}  # {filename: size}
+
+        while time.time() < deadline and found < submitted and self.running:
             time.sleep(3)
+            try:
+                # Bug 5 fixed: scan ca hai folder
+                for _mdir in monitor_dirs:
+                    if not os.path.exists(_mdir): continue
+                    current = set(os.listdir(_mdir))
+                    added = current - snap.get(_mdir, set())
+                    new_mp4s = sorted([f for f in added
+                                       if f.endswith('.mp4') and not f.endswith('.crdownload')])
+                    for fname in new_mp4s:
+                        _fp = os.path.join(_mdir, fname)
+                        sz = os.path.getsize(_fp) if os.path.exists(_fp) else 0
+                        if prev_size_map.get(fname) == sz and sz > 0:
+                            dst_name = f"{base}_{video_counter:02d}.mp4"
+                            dst = os.path.join(out_dir, dst_name)
+                            if not os.path.exists(dst):
+                                shutil.move(_fp, dst)
+                                sz_mb = os.path.getsize(dst) / 1024 / 1024
+                                self.log(f"Tai ve #{video_counter}: {dst_name} ({sz_mb:.1f} MB)")
+                                snap.setdefault(_mdir, set()).add(dst_name)
+                                video_counter += 1
+                                found += 1
+                                self.root.after(0, lambda f=found, s=submitted:
+                                    self.tv_status_lbl.config(text=f"Da nhan {f}/{s} video"))
+                        else:
+                            prev_size_map[fname] = sz
+            except Exception as e:
+                self.log(f"Monitor: {e}")
 
-        # Dừng watcher
-        watcher_stop.set()
-        watcher_thread.join(timeout=5)
-
-        with dl_lock:
-            final_count = dl_counter[0] - 1
-        self.running = False
-        self.root.after(0, self.tv_progress.stop)
-        self.root.after(0, lambda: self.tv_status_lbl.config(text=""))
-        self.log(f"\n🏁 PIPELINE hoàn tất! Đã tải {final_count}/{submitted} video → {out_dir}")
+        self.log(f"\n✅ RAPID xong! Nhận {found}/{submitted} video → {out_dir}")
 
     # ── TAB 4: Nhân Vật ─────────────────────────────────
     def _tab_char_setup(self):
