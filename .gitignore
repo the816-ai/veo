@@ -54,3 +54,10 @@ user_data/
 # Downloads
 downloads/
 Downloads/
+# === BẢO MẬT - KHÔNG PUSH ===
+keygen.py
+dist/
+build/
+*.spec
+__pycache__/
+*.pyc
