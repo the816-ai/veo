@@ -3120,7 +3120,29 @@ if __name__ == "__main__":
         print("✅ Xong! Vui lòng chạy lại.")
         sys.exit(0)
 
-    root = Tk()
-    app = VeoApp(root)
-    root.protocol("WM_DELETE_WINDOW", root.quit)
-    root.mainloop()
+    try:
+        root = Tk()
+        app = VeoApp(root)
+        root.protocol("WM_DELETE_WINDOW", root.quit)
+        root.mainloop()
+    except Exception as _fatal_err:
+        # Ghi log lỗi ra file để debug
+        import traceback
+        _crash_log = os.path.join(os.path.expanduser("~"), ".veo3", "crash.log")
+        os.makedirs(os.path.dirname(_crash_log), exist_ok=True)
+        with open(_crash_log, "w", encoding="utf-8") as _f:
+            _f.write(f"CRASH at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            _f.write(f"Error: {_fatal_err}\n\n")
+            traceback.print_exc(file=_f)
+        # Hiện thông báo lỗi cho user thấy
+        try:
+            from tkinter import Tk as _Tk, messagebox as _mb
+            _r = _Tk()
+            _r.withdraw()
+            _mb.showerror("Lỗi khởi động",
+                f"App gặp lỗi:\n{_fatal_err}\n\nChi tiết: {_crash_log}")
+            _r.destroy()
+        except:
+            pass
+        sys.exit(1)
+
